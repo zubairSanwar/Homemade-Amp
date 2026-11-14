@@ -187,6 +187,11 @@ struct Amp{
     //sample, so they have to be atomic or the optimiser may never reload them
     atomic<bool> distortion_on{false}, loop_on{false}, delay_on{false};
 
+    //DIAGNOSTIC: peak meters, written by the audio thread, read+reset by the main
+    //thread. Approximate by design - a lost update just means one slightly low reading.
+    atomic<float> peakIn{0.0f}, peakOut{0.0f};
+    atomic<bool> testTone{false};   //DIAGNOSTIC: ignore the guitar, emit a sine instead
+
     void init(int sRate){
         sampleRate = sRate;
 
@@ -285,18 +290,35 @@ void audio_process(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
 
     amp->applyControls();   //apply any knob presses once here, not per sample
 
+    static float phase = 0.0f;
+    bool tone = amp->testTone.load();
+    float pin = 0.0f, pout = 0.0f;
+
     for (ma_uint32 i = 0; i < frameCount; ++i) {
-        float op = amp->processAudio(in[i]);
+        float src = in[i];
+        if (tone) {     //DIAGNOSTIC: quiet 440 Hz sine in place of the guitar
+            src = 0.1f * sinf(phase);
+            phase += 2.0f * 3.14159265f * 440.0f / amp->sampleRate;
+            if (phase > 2.0f*3.14159265f) phase -= 2.0f*3.14159265f;
+        }
+        if (fabsf(in[i]) > pin) pin = fabsf(in[i]);
+
+        float op = amp->processAudio(src);
 
         //clipping input between fixed range to prevent issues in effects (e.g. in delay we might record faulty value leading to noise until reset)
         if (!isfinite(op)) op = 0.0f;
         if (op >  1.0f) op =  1.0f;
         if (op < -1.0f) op = -1.0f;
 
+        if (fabsf(op) > pout) pout = fabsf(op);
+
         //mono to stereo
         out[i * 2]     = op;   
         out[i * 2 + 1] = op;   
     }
+
+    if (pin  > amp->peakIn.load())  amp->peakIn.store(pin);
+    if (pout > amp->peakOut.load()) amp->peakOut.store(pout);
 }
 
 void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for testing
@@ -304,6 +326,7 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
          << "  values   -> Gain: g, Drive: dr, Dist level: d, Smooth: s, Delay time: dt, Delay fade: df\n"
          << "  switches -> Distortion: ds, Delay: dl, Loop: l\n"
          << "  looper   -> Record: r, Overdub: o, Reset loop: lr, Reset delay: del\n"
+         << "  diag     -> Peak levels: pk, Test tone: t\n"
          << "  quit     -> q\n\n";
 
     string cmd;
@@ -337,6 +360,15 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
         else if (cmd=="o")   amp->toggleLoopOverdub();
         else if (cmd=="lr")  amp->resetLoop();
         else if (cmd=="del") amp->resetDelay();
+        else if (cmd=="pk") {   //DIAGNOSTIC: peak since last check - is audio flowing?
+            cout << "  peak in=" << amp->peakIn.exchange(0.0f)
+                 << "  out=" << amp->peakOut.exchange(0.0f) << "\n";
+        }
+        else if (cmd=="t") {    //DIAGNOSTIC: test tone, takes the guitar out of the picture
+            bool on = !amp->testTone.load();
+            amp->testTone = on;
+            cout << "  test tone " << (on?"ON":"off") << "\n";
+        }
         else cout << "? unknown command\n";
     }
 }
