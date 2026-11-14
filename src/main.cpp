@@ -361,6 +361,19 @@ int main() {
         cout << "Failed to initialize audio device\n";
         return -1;
     }
+
+    // ---- TEMPORARY DIAGNOSTIC ----
+    cout << "capture : " << device.capture.name
+        << "  ch=" << device.capture.internalChannels
+        << " rate=" << device.capture.internalSampleRate
+        << " period=" << device.capture.internalPeriodSizeInFrames << "\n";
+    cout << "playback: " << device.playback.name
+        << "  ch=" << device.playback.internalChannels
+        << " rate=" << device.playback.internalSampleRate
+        << " period=" << device.playback.internalPeriodSizeInFrames << "\n";
+    // ------------------------------
+
+
     amp.init(device.sampleRate);
     cout << "Sample rate: " << device.sampleRate << "\n";
     cout << "Audio running.\n\n";
