@@ -190,6 +190,11 @@ struct Amp{
     //DIAGNOSTIC: peak meters, written by the audio thread, read+reset by the main
     //thread. Approximate by design - a lost update just means one slightly low reading.
     atomic<float> peakIn{0.0f}, peakOut{0.0f};
+
+    //Which input channel the guitar is plugged into, counting from 0. The M-Audio
+    //puts its instrument input on channel 2, so 1. A mono device (laptop mic) only
+    //has channel 0 - the callback clamps this, so an out-of-range value is harmless.
+    atomic<int> inputChannel{1};
     atomic<bool> testTone{false};   //DIAGNOSTIC: ignore the guitar, emit a sine instead
 
     void init(int sRate){
@@ -290,18 +295,30 @@ void audio_process(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
 
     amp->applyControls();   //apply any knob presses once here, not per sample
 
+    //The device picks its own channel counts, so read them rather than assume.
+    //Both are fixed at init time, so they are safe to read from the audio thread.
+    const ma_uint32 inCh  = pDevice->capture.channels;
+    const ma_uint32 outCh = pDevice->playback.channels;
+
+    //pick the guitar's channel once per buffer, clamped so we can never read past
+    //the end of a frame no matter what the user sets
+    ma_uint32 ch = (ma_uint32)amp->inputChannel.load();
+    if (ch >= inCh) ch = inCh - 1;
+
     static float phase = 0.0f;
     bool tone = amp->testTone.load();
     float pin = 0.0f, pout = 0.0f;
 
     for (ma_uint32 i = 0; i < frameCount; ++i) {
-        float src = in[i];
+        //interleaved: frame i starts at i*inCh, then step to the channel we want
+        float src = in[i * inCh + ch];
+        if (fabsf(src) > pin) pin = fabsf(src);
+
         if (tone) {     //DIAGNOSTIC: quiet 440 Hz sine in place of the guitar
             src = 0.1f * sinf(phase);
             phase += 2.0f * 3.14159265f * 440.0f / amp->sampleRate;
             if (phase > 2.0f*3.14159265f) phase -= 2.0f*3.14159265f;
         }
-        if (fabsf(in[i]) > pin) pin = fabsf(in[i]);
 
         float op = amp->processAudio(src);
 
@@ -312,9 +329,8 @@ void audio_process(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
 
         if (fabsf(op) > pout) pout = fabsf(op);
 
-        //mono to stereo
-        out[i * 2]     = op;   
-        out[i * 2 + 1] = op;   
+        //mono out to however many output channels the device has (same signal to each)
+        for (ma_uint32 c = 0; c < outCh; ++c) out[i * outCh + c] = op;
     }
 
     if (pin  > amp->peakIn.load())  amp->peakIn.store(pin);
@@ -326,7 +342,7 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
          << "  values   -> Gain: g, Drive: dr, Dist level: d, Smooth: s, Delay time: dt, Delay fade: df\n"
          << "  switches -> Distortion: ds, Delay: dl, Loop: l\n"
          << "  looper   -> Record: r, Overdub: o, Reset loop: lr, Reset delay: del\n"
-         << "  diag     -> Peak levels: pk, Test tone: t\n"
+         << "  diag     -> Peak levels: pk, Test tone: t, Input channel: ic <n>\n"
          << "  quit     -> q\n\n";
 
     string cmd;
@@ -336,7 +352,7 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
         if (!(cin >> cmd)) break;   //end of input / ctrl-D
 
         //commands that expect a number after them
-        bool needsVal = (cmd=="g"||cmd=="dr"||cmd=="d"||cmd=="s"||cmd=="dt"||cmd=="df");
+        bool needsVal = (cmd=="g"||cmd=="dr"||cmd=="d"||cmd=="s"||cmd=="dt"||cmd=="df"||cmd=="ic");
         if (needsVal && !(cin >> val)) {
             //a failed read latches the stream into a failed state and every later read
             //returns false, so without this one typo would silently end the session
@@ -364,6 +380,10 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
             cout << "  peak in=" << amp->peakIn.exchange(0.0f)
                  << "  out=" << amp->peakOut.exchange(0.0f) << "\n";
         }
+        else if (cmd=="ic") {   //which input channel the guitar is on (0-based)
+            amp->inputChannel = (int)val;
+            cout << "  input channel " << (int)val << "\n";
+        }
         else if (cmd=="t") {    //DIAGNOSTIC: test tone, takes the guitar out of the picture
             bool on = !amp->testTone.load();
             amp->testTone = on;
@@ -377,11 +397,15 @@ int main() {
 
     ma_device_config config = ma_device_config_init(ma_device_type_duplex);
 
+    //Format we want miniaudio to hand us: f32 is a conversion it does for free.
+    //Channels and sample rate stay 0 = "whatever the device natively uses". Forcing
+    //capture to 1 channel on a 2-channel interface makes CoreAudio hand back a silent
+    //stream instead of downmixing, which is why the guitar never arrived.
     config.capture.format   = ma_format_f32;   // float samples in
-    config.capture.channels = 1;               // guitar = mono
+    config.capture.channels = 0;               // 0 = native
     config.playback.format  = ma_format_f32;   // float samples out
-    config.playback.channels = 2;              // stereo output
-    config.sampleRate       = 48000;
+    config.playback.channels = 0;              // 0 = native
+    config.sampleRate       = 0;               // 0 = native
     config.periodSizeInFrames = 128;           // requested buffer size
     config.dataCallback     = audio_process;   // <-- handing it over 
 
@@ -398,11 +422,13 @@ int main() {
     cout << "capture : " << device.capture.name
         << "  ch=" << device.capture.internalChannels
         << " rate=" << device.capture.internalSampleRate
-        << " period=" << device.capture.internalPeriodSizeInFrames << "\n";
+        << " period=" << device.capture.internalPeriodSizeInFrames
+        << "   [app sees " << device.capture.channels << " ch]\n";
     cout << "playback: " << device.playback.name
         << "  ch=" << device.playback.internalChannels
         << " rate=" << device.playback.internalSampleRate
-        << " period=" << device.playback.internalPeriodSizeInFrames << "\n";
+        << " period=" << device.playback.internalPeriodSizeInFrames
+        << "   [app sees " << device.playback.channels << " ch]\n";
     // ------------------------------
 
 
