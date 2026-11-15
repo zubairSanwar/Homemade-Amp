@@ -145,6 +145,34 @@ struct Biquad {
         a2 = (1.0f - alpha) / a0;
     }
 
+    void setLowShelf(float freq, float gainDb, float sr) {
+        float A = powf(10.0f, gainDb / 40.0f);
+        float w0 = 2.0f * 3.14159265f * freq / sr;
+        float cosw = cosf(w0);
+        float alpha = sinf(w0) / 2.0f * 1.41421356f;   //S=1, the usual shelf slope
+        float sqA2alpha = 2.0f * sqrtf(A) * alpha;
+        float a0 =          (A+1.0f) + (A-1.0f)*cosw + sqA2alpha;
+        b0 =        A * (   (A+1.0f) - (A-1.0f)*cosw + sqA2alpha ) / a0;
+        b1 = 2.0f * A * (   (A-1.0f) - (A+1.0f)*cosw             ) / a0;
+        b2 =        A * (   (A+1.0f) - (A-1.0f)*cosw - sqA2alpha ) / a0;
+        a1 =    -2.0f * (   (A-1.0f) + (A+1.0f)*cosw             ) / a0;
+        a2 =            (   (A+1.0f) + (A-1.0f)*cosw - sqA2alpha ) / a0;
+    }
+
+    void setHighShelf(float freq, float gainDb, float sr) {
+        float A = powf(10.0f, gainDb / 40.0f);
+        float w0 = 2.0f * 3.14159265f * freq / sr;
+        float cosw = cosf(w0);
+        float alpha = sinf(w0) / 2.0f * 1.41421356f;
+        float sqA2alpha = 2.0f * sqrtf(A) * alpha;
+        float a0 =          (A+1.0f) - (A-1.0f)*cosw + sqA2alpha;
+        b0 =        A * (   (A+1.0f) + (A-1.0f)*cosw + sqA2alpha ) / a0;
+        b1 =-2.0f * A * (   (A-1.0f) + (A+1.0f)*cosw             ) / a0;
+        b2 =        A * (   (A+1.0f) + (A-1.0f)*cosw - sqA2alpha ) / a0;
+        a1 =     2.0f * (   (A-1.0f) - (A+1.0f)*cosw             ) / a0;
+        a2 =            (   (A+1.0f) - (A-1.0f)*cosw - sqA2alpha ) / a0;
+    }
+
     void setPeaking(float freq, float gainDb, float Q, float sr) {
         float A = powf(10.0f, gainDb / 40.0f);
         float w0 = 2.0f * 3.14159265f * freq / sr;
@@ -210,6 +238,59 @@ struct Delay {
 
 };
 
+struct EQ {
+    Biquad low, mid, high;
+
+    atomic<float> lowDb{0.0f}, midDb{0.0f}, highDb{0.0f};
+    atomic<bool> dirty{true};
+    float sr = 48000.0f;
+
+    void init(float sampleRate){
+        sr = sampleRate;
+        dirty = true;
+        applyControls();    //build the initial (flat) coefficients
+    }
+
+    void applyControls(){   //audio thread, once per buffer
+        if (!dirty.exchange(false)) return;
+        low.setLowShelf(100.0f,  lowDb.load(),  sr);    //bass
+        mid.setPeaking(600.0f,   midDb.load(),  0.8f, sr);  //mids, wide-ish Q
+        high.setHighShelf(3000.0f, highDb.load(), sr);  //treble
+    }
+
+    float applyEQ(float sample){
+        return high.applyBiquad(mid.applyBiquad(low.applyBiquad(sample)));
+    }
+};
+
+struct Gate {
+    //kill singal when not playing to stop buzz
+    atomic<float> threshold{0.00316f};  //-50 dBFS
+
+    float env = 0.0f;       
+    float g   = 0.0f;       //current multiplier: 0 = shut, 1 = fully open
+    float attack=0.0f, release=0.0f, envFall=0.0f;
+
+    void init(float sampleRate){
+        attack  = 1.0f - expf(-1.0f/(0.001f*sampleRate));   //1 ms open: fast, so picking survives
+        release = 1.0f - expf(-1.0f/(0.080f*sampleRate));   //80 ms close: slow, so notes ring out
+        envFall = 1.0f - expf(-1.0f/(0.030f*sampleRate));   //how fast the level detector falls
+        env = 0.0f; g = 0.0f;
+    }
+
+    float applyGate(float sample){
+        float a = fabsf(sample);
+        if (a > env) env = a;
+        else env += envFall * (a - env);
+
+        float t = threshold.load();
+        float target = (env > t) ? 1.0f : ((env < t*0.5f) ? 0.0f : g);
+
+        g += ((target > g) ? attack : release) * (target - g);
+        return sample * g;
+    }
+};
+
 struct Cabinet{
     Biquad highPass, lowPass1, lowPass2, bump;
 
@@ -234,6 +315,8 @@ struct Amp{
     Loop loop;
     Delay delay;
     Cabinet cabinet;
+    EQ eq;
+    Gate gate;
     int sampleRate;
 
     //written by the main thread (the flip functions), read by the audio thread every
@@ -243,6 +326,10 @@ struct Amp{
     //The switch is for testing: it restores a clean bypass path and lets you A/B the
     //filter by ear.
     atomic<bool> cabinet_on{true};
+    //EQ sits at 0 dB on every band by default, so leaving it on changes nothing until
+    //you turn a knob. The gate is opt-in, like the other effects.
+    atomic<bool> eq_on{true};
+    atomic<bool> gate_on{false};
 
     //DIAGNOSTIC: peak meters, written by the audio thread, read+reset by the main
     //thread. Approximate by design - a lost update just means one slightly low reading.
@@ -260,6 +347,8 @@ struct Amp{
         loop.init(sampleRate);
         delay.init(sampleRate);
         cabinet.init(sampleRate);   //without this the biquads stay at pass-through
+        eq.init(sampleRate);
+        gate.init(sampleRate);
         distortion_on=false;
         loop_on=false;
         delay_on=false;
@@ -291,6 +380,29 @@ struct Amp{
         if (t<0.1f) t=0.1f;
         delay.delay_t = t;
     }
+    //EQ bands, in dB. +/-15 is already a drastic amount of tone shaping.
+    void adjustEQLow(float db){
+        if (db<-15.0f) db=-15.0f;
+        if (db> 15.0f) db= 15.0f;
+        eq.lowDb = db; eq.dirty = true;
+    }
+    void adjustEQMid(float db){
+        if (db<-15.0f) db=-15.0f;
+        if (db> 15.0f) db= 15.0f;
+        eq.midDb = db; eq.dirty = true;
+    }
+    void adjustEQHigh(float db){
+        if (db<-15.0f) db=-15.0f;
+        if (db> 15.0f) db= 15.0f;
+        eq.highDb = db; eq.dirty = true;
+    }
+    //Gate threshold given in dBFS, which is easier to reason about than a raw
+    //amplitude. Your noise floor sits near -78 dBFS and a strum near -14 dBFS.
+    void adjustGateThreshold(float db){
+        if (db<-90.0f) db=-90.0f;
+        if (db>  0.0f) db=  0.0f;
+        gate.threshold = powf(10.0f, db/20.0f);
+    }
     void adjustDelayFadeFactor(float f){
         //needs to be between 0-0.95 -> if higher then delay may never fade leading to noise
         if (f>0.95f) f = 0.95f;
@@ -318,6 +430,12 @@ struct Amp{
     void flipCabinet(){
         cabinet_on=!cabinet_on;
     }
+    void flipEQ(){
+        eq_on=!eq_on;
+    }
+    void flipGate(){
+        gate_on=!gate_on;
+    }
 
     //resetting memory effects
     void resetLoop(){
@@ -331,14 +449,22 @@ struct Amp{
     void applyControls(){
         loop.applyControls();
         delay.applyControls();
+        eq.applyControls();     //rebuild filter coefficients if a tone knob moved
     }
 
     //applying effects depending on whether active or not
     float processAudio(float sample){
         float op = sample;
-        if (loop_on) op = loop.applyLoop(sample);
+        //Gate the live guitar first, before anything amplifies the hiss. Note it runs
+        //on the live signal only - loop playback is added afterwards, so an old loop
+        //does not get chopped up by the gate.
+        if (gate_on) op = gate.applyGate(op);
+        if (loop_on) op = loop.applyLoop(op);
         op = gain.applyGain(op);
         if (distortion_on) op=distortion.applyDistortion(op);
+        //Tone stack sits after the distortion and before the speaker, same as a real
+        //amp: preamp -> tone stack -> power amp -> cabinet.
+        if (eq_on) op = eq.applyEQ(op);
         if (cabinet_on) op = cabinet.applyCabinet(op);   //the speaker: always on in normal use
         if (delay_on) op=delay.applyDelay(op);
 
@@ -402,7 +528,9 @@ void audio_process(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
 void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for testing
     cout << "Adjust: <cmd> <value>    Toggle/reset: <cmd>\n"
          << "  values   -> Gain: g, Drive: dr, Dist level: d, Smooth: s, Delay time: dt, Delay fade: df\n"
-         << "  switches -> Distortion: ds, Delay: dl, Loop: l, Cabinet: cb (on by default)\n"
+         << "  switches -> Distortion: ds, Delay: dl, Loop: l, Cabinet: cb, EQ: eq, Gate: gs\n"
+         << "  tone     -> Bass: eb <dB>, Mid: em <dB>, Treble: et <dB>  (-15..+15)\n"
+         << "  gate     -> Threshold: gt <dBFS>  (try -50)\n"
          << "  looper   -> Record: r, Overdub: o, Reset loop: lr, Reset delay: del\n"
          << "  diag     -> Peak levels: pk, Test tone: t, Input channel: ic <n>\n"
          << "  quit     -> q\n\n";
@@ -414,7 +542,8 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
         if (!(cin >> cmd)) break;   //end of input / ctrl-D
 
         //commands that expect a number after them
-        bool needsVal = (cmd=="g"||cmd=="dr"||cmd=="d"||cmd=="s"||cmd=="dt"||cmd=="df"||cmd=="ic");
+        bool needsVal = (cmd=="g"||cmd=="dr"||cmd=="d"||cmd=="s"||cmd=="dt"||cmd=="df"||cmd=="ic"
+                      ||cmd=="eb"||cmd=="em"||cmd=="et"||cmd=="gt");
         if (needsVal && !(cin >> val)) {
             //a failed read latches the stream into a failed state and every later read
             //returns false, so without this one typo would silently end the session
@@ -435,6 +564,12 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
         else if (cmd=="dl")  amp->flipDelay();
         else if (cmd=="l")   amp->flipLoop();
         else if (cmd=="cb")  amp->flipCabinet();
+        else if (cmd=="eq")  amp->flipEQ();
+        else if (cmd=="gs")  amp->flipGate();
+        else if (cmd=="eb")  amp->adjustEQLow(val);
+        else if (cmd=="em")  amp->adjustEQMid(val);
+        else if (cmd=="et")  amp->adjustEQHigh(val);
+        else if (cmd=="gt")  amp->adjustGateThreshold(val);
         else if (cmd=="r")   amp->toggleLoopRecord();
         else if (cmd=="o")   amp->toggleLoopOverdub();
         else if (cmd=="lr")  amp->resetLoop();

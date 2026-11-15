@@ -10,7 +10,7 @@ int main(){
 
     // 1. Everything bypassed must be bit-identical to the input.
     {
-        Amp a; a.init(SR); a.flipCabinet();   // speaker off: this is the clean-path canary
+        Amp a; a.init(SR); a.flipCabinet(); a.flipEQ();   // clean path: no speaker, no tone stack
         bool same = true;
         for (int i=0;i<SR;i++){ float x = sin(i*0.01f)*0.8f; if (a.processAudio(x)!=x) same=false; }
         check(same, "bypass is transparent (output == input)");
@@ -56,7 +56,7 @@ int main(){
 
     // 4. Feedback must decay, never run away.
     {
-        Amp a; a.init(SR); a.flipCabinet(); a.flipDelay(); a.adjustDelayTime(0.1f); a.adjustDelayFadeFactor(5.0f);
+        Amp a; a.init(SR); a.flipCabinet(); a.flipEQ(); a.flipDelay(); a.adjustDelayTime(0.1f); a.adjustDelayFadeFactor(5.0f);
         float peak = 0;
         for (int i=0;i<SR*8;i++){ float x=(i<1000)?0.9f:0.0f; float y=a.processAudio(x); if(fabs(y)>peak) peak=fabs(y); }
         check(peak<=1.0f && isfinite(peak), "feedback clamped: no runaway even when asked for >1");
@@ -64,7 +64,7 @@ int main(){
 
     // 5. Looper: record/close now go through the request flags.
     {
-        Amp a; a.init(SR); a.flipCabinet(); a.flipLoop();
+        Amp a; a.init(SR); a.flipCabinet(); a.flipEQ(); a.flipLoop();
         a.toggleLoopRecord(); a.applyControls();          // main thread asks, audio thread acts
         for (int i=0;i<1000;i++) a.processAudio((float)(i+1)/1000.0f);
         a.toggleLoopRecord(); a.applyControls();
@@ -103,7 +103,7 @@ int main(){
 
     // 8. A clear request must actually silence the delay's echoes.
     {
-        Amp a; a.init(SR); a.flipCabinet(); a.flipDelay(); a.adjustDelayTime(0.1f);
+        Amp a; a.init(SR); a.flipCabinet(); a.flipEQ(); a.flipDelay(); a.adjustDelayTime(0.1f);
         for (int i=0;i<1000;i++) a.processAudio(0.9f);     // fill the line with echoes
         a.resetDelay(); a.applyControls();
         float sum=0; for (int i=0;i<SR;i++) sum += fabs(a.processAudio(0.0f));
@@ -118,6 +118,47 @@ int main(){
                                 if (fabs(y)>peak) peak=fabs(y); }
         printf("     (hot 2.5 kHz input 0.9 -> peak %.3f before the callback clamp)\n", peak);
         check(peak < 2.0f, "cabinet boost stays within one clamp's worth of headroom");
+    }
+
+    // 10. Noise gate behaviour.
+    {
+        const float SR2 = 48000;
+        // a) hiss well under the threshold must be crushed
+        {   Gate gt; gt.init(SR2); gt.threshold = 0.00316f;   // -50 dBFS
+            float pk=0;
+            for (int i=0;i<SR2;i++){ float y=gt.applyGate(0.0001f*sinf(i*0.1f)); if(fabs(y)>pk) pk=fabs(y); }
+            check(pk < 0.0001f*0.05f, "gate crushes hiss below the threshold");
+        }
+        // b) a real note must pass essentially untouched once open
+        {   Gate gt; gt.init(SR2); gt.threshold = 0.00316f;
+            float pk=0;
+            for (int i=0;i<SR2;i++){ float y=gt.applyGate(0.2f*sinf(2.0f*3.14159265f*220.0f*i/SR2));
+                                     if (i>SR2/10 && fabs(y)>pk) pk=fabs(y); }
+            check(pk > 0.19f, "gate passes a real note at full level");
+        }
+        // c) the attack must survive - gate must be open within a few ms of a note starting
+        {   Gate gt; gt.init(SR2); gt.threshold = 0.00316f;
+            int openAt = -1;
+            for (int i=0;i<SR2/10;i++){
+                float y = gt.applyGate(0.2f*sinf(2.0f*3.14159265f*220.0f*i/SR2));
+                float want = 0.2f*fabs(sinf(2.0f*3.14159265f*220.0f*i/SR2));
+                if (openAt<0 && want>0.1f && fabs(y) > want*0.9f) openAt = i;
+            }
+            float ms = openAt*1000.0f/SR2;
+            printf("     (gate fully open %.1f ms after the note starts)\n", ms);
+            check(openAt >= 0 && ms < 15.0f, "gate opens fast enough not to clip the pick attack");
+        }
+        // d) no chatter: watch the gate's own multiplier, not the waveform (the sine
+        //    crosses zero 440x a second, which is not the gate opening and closing)
+        {   Gate gt; gt.init(SR2); gt.threshold = 0.01f;
+            float prev=1; int flips=0;
+            for (int i=0;i<SR2;i++){
+                float amp = 0.2f*expf(-3.0f*i/SR2);                 // decaying note
+                gt.applyGate(amp*sinf(2.0f*3.14159265f*220.0f*i/SR2));
+                if (i>100){ float now = gt.g>0.5f?1.0f:0.0f; if(now!=prev) flips++; prev=now; }
+            }
+            check(flips <= 1, "gate does not chatter as a note decays through the threshold");
+        }
     }
 
     printf("\n%s\n", fails? "SOME TESTS FAILED" : "all tests passed");
