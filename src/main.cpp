@@ -118,9 +118,43 @@ struct Biquad {
 
     float applyBiquad(float sample){
         float y = b0*sample + n1;
-        n1 = b1*sample - a1*y + n2;
-        n2 = b2*sample - a2*y;
+        n1 = b1*sample - a1*y + n2; //store sample - 1
+        n2 = b2*sample - a2*y;  //store sample - 2
         return y;
+    }
+
+    void setLowPass(float freq, float Q, float sr) {
+        float w0 = 2.0f * 3.14159265f * freq / sr;
+        float cosw = cosf(w0), alpha = sinf(w0) / (2.0f * Q);
+        float a0 = 1.0f + alpha;
+        b0 = ((1.0f - cosw) / 2.0f) / a0;
+        b1 = (1.0f - cosw) / a0;
+        b2 = b0;
+        a1 = (-2.0f * cosw) / a0;
+        a2 = (1.0f - alpha) / a0;
+    }
+
+    void setHighPass(float freq, float Q, float sr) {
+        float w0 = 2.0f * 3.14159265f * freq / sr;
+        float cosw = cosf(w0), alpha = sinf(w0) / (2.0f * Q);
+        float a0 = 1.0f + alpha;
+        b0 = ((1.0f + cosw) / 2.0f) / a0;
+        b1 = (-(1.0f + cosw)) / a0;
+        b2 = b0;
+        a1 = (-2.0f * cosw) / a0;
+        a2 = (1.0f - alpha) / a0;
+    }
+
+    void setPeaking(float freq, float gainDb, float Q, float sr) {
+        float A = powf(10.0f, gainDb / 40.0f);
+        float w0 = 2.0f * 3.14159265f * freq / sr;
+        float cosw = cosf(w0), alpha = sinf(w0) / (2.0f * Q);
+        float a0 = 1.0f + alpha / A;
+        b0 = (1.0f + alpha * A) / a0;
+        b1 = (-2.0f * cosw) / a0;
+        b2 = (1.0f - alpha * A) / a0;
+        a1 = b1;  // same -2*cos(w0) term, same a0 division
+        a2 = (1.0f - alpha / A) / a0;
     }
 };
 
@@ -176,16 +210,39 @@ struct Delay {
 
 };
 
+struct Cabinet{
+    Biquad highPass, lowPass1, lowPass2, bump;
+
+    void init(float sampleRate) {
+        highPass.setHighPass(90.0f, 0.707f, sampleRate);
+        lowPass1.setLowPass(5000.0f, 0.707f, sampleRate);
+        lowPass2.setLowPass(5000.0f, 0.707f, sampleRate);
+        bump.setPeaking(2500.0f, 4.0f, 1.0f, sampleRate);
+    }
+
+    float applyCabinet(float sample) {
+        float x = highPass.applyBiquad(sample);
+        x = lowPass1.applyBiquad(x);
+        x = lowPass2.applyBiquad(x);
+        return bump.applyBiquad(x);
+    }
+};
+
 struct Amp{
     Gain gain;
     Distortion distortion;
     Loop loop;
     Delay delay;
+    Cabinet cabinet;
     int sampleRate;
 
     //written by the main thread (the flip functions), read by the audio thread every
     //sample, so they have to be atomic or the optimiser may never reload them
     atomic<bool> distortion_on{false}, loop_on{false}, delay_on{false};
+    //A real amp always has a speaker, so this defaults ON and stays on in normal use.
+    //The switch is for testing: it restores a clean bypass path and lets you A/B the
+    //filter by ear.
+    atomic<bool> cabinet_on{true};
 
     //DIAGNOSTIC: peak meters, written by the audio thread, read+reset by the main
     //thread. Approximate by design - a lost update just means one slightly low reading.
@@ -202,6 +259,7 @@ struct Amp{
 
         loop.init(sampleRate);
         delay.init(sampleRate);
+        cabinet.init(sampleRate);   //without this the biquads stay at pass-through
         distortion_on=false;
         loop_on=false;
         delay_on=false;
@@ -257,6 +315,9 @@ struct Amp{
     void flipDelay(){
         delay_on=!delay_on;
     }
+    void flipCabinet(){
+        cabinet_on=!cabinet_on;
+    }
 
     //resetting memory effects
     void resetLoop(){
@@ -278,6 +339,7 @@ struct Amp{
         if (loop_on) op = loop.applyLoop(sample);
         op = gain.applyGain(op);
         if (distortion_on) op=distortion.applyDistortion(op);
+        if (cabinet_on) op = cabinet.applyCabinet(op);   //the speaker: always on in normal use
         if (delay_on) op=delay.applyDelay(op);
 
         return op;
@@ -340,7 +402,7 @@ void audio_process(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
 void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for testing
     cout << "Adjust: <cmd> <value>    Toggle/reset: <cmd>\n"
          << "  values   -> Gain: g, Drive: dr, Dist level: d, Smooth: s, Delay time: dt, Delay fade: df\n"
-         << "  switches -> Distortion: ds, Delay: dl, Loop: l\n"
+         << "  switches -> Distortion: ds, Delay: dl, Loop: l, Cabinet: cb (on by default)\n"
          << "  looper   -> Record: r, Overdub: o, Reset loop: lr, Reset delay: del\n"
          << "  diag     -> Peak levels: pk, Test tone: t, Input channel: ic <n>\n"
          << "  quit     -> q\n\n";
@@ -372,6 +434,7 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
         else if (cmd=="ds")  amp->flipDistortion();
         else if (cmd=="dl")  amp->flipDelay();
         else if (cmd=="l")   amp->flipLoop();
+        else if (cmd=="cb")  amp->flipCabinet();
         else if (cmd=="r")   amp->toggleLoopRecord();
         else if (cmd=="o")   amp->toggleLoopOverdub();
         else if (cmd=="lr")  amp->resetLoop();
