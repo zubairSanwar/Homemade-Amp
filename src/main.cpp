@@ -309,6 +309,56 @@ struct Cabinet{
     }
 };
 
+struct Reverb {
+    //Freeverb by Jezar at Dreampoint (public domain): 8 parallel damped
+    //comb filters build the tail, 4 series allpasses smear it.
+
+    atomic<float> roomSize{0.5f}, mix{0.3f}, damp{0.4f};
+
+    std::vector<float> combBuf[8];
+    int   combIdx[8]   = {};
+    float combStore[8] = {};
+
+    std::vector<float> apBuf[4];
+    int apIdx[4] = {};
+
+    void init(float sr) {
+        const int combLen[8] = {1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617};
+        const int apLen[4]   = {556, 441, 341, 225};
+        float scale = sr / 44100.0f;
+        for (int i = 0; i < 8; i++) { combBuf[i].assign((int)(combLen[i] * scale), 0.0f); combIdx[i] = 0; combStore[i] = 0.0f; }
+        for (int i = 0; i < 4; i++) { apBuf[i].assign((int)(apLen[i] * scale), 0.0f);   apIdx[i] = 0; }
+    }
+
+    float applyReverb(float x) {
+        float d = damp;
+        float feedback = 0.7f + roomSize * 0.28f;
+        float in = x * 0.015f;
+        float wet = 0;
+
+        for (int i = 0; i < 8; i++) {
+            float out = combBuf[i][combIdx[i]];
+            combStore[i] = out * (1.0f - d) + combStore[i] * d;
+            combBuf[i][combIdx[i]] = in + combStore[i] * feedback;
+            if (++combIdx[i] >= (int)combBuf[i].size()) combIdx[i] = 0;
+            wet += out;
+        }
+
+        for (int i = 0; i < 4; i++) {
+            float delayed = apBuf[i][apIdx[i]];
+            apBuf[i][apIdx[i]] = wet + delayed * 0.5f;
+            if (++apIdx[i] >= (int)apBuf[i].size()) apIdx[i] = 0;
+            wet = -wet + delayed;
+        }
+
+        //equal-power crossfade: dry and wet are uncorrelated, so fading them with
+        //sqrt keeps the total level flat. A plain (1-mix)/mix fade dips ~3 dB in
+        //the middle. 3.5 is the gain that puts the fully-wet signal at unity.
+        float m = mix;
+        return x * sqrtf(1.0f - m) + wet * 3.5f * sqrtf(m);
+    }
+};
+
 struct Amp{
     Gain gain;
     Distortion distortion;
@@ -317,23 +367,12 @@ struct Amp{
     Cabinet cabinet;
     EQ eq;
     Gate gate;
+    Reverb reverb;
     int sampleRate;
     atomic<float> master{1.0f};
 
-    //written by the main thread (the flip functions), read by the audio thread every
-    //sample, so they have to be atomic or the optimiser may never reload them
-    atomic<bool> distortion_on{false}, loop_on{false}, delay_on{false};
-    //A real amp always has a speaker, so this defaults ON and stays on in normal use.
-    //The switch is for testing: it restores a clean bypass path and lets you A/B the
-    //filter by ear.
-    atomic<bool> cabinet_on{true};
-    //EQ sits at 0 dB on every band by default, so leaving it on changes nothing until
-    //you turn a knob. The gate is opt-in, like the other effects.
-    atomic<bool> eq_on{true};
-    atomic<bool> gate_on{false};
+    atomic<bool> distortion_on{false}, loop_on{false}, delay_on{false}, reverb_on{false}, cabinet_on{true}, eq_on{true}, gate_on{true};
 
-    //DIAGNOSTIC: peak meters, written by the audio thread, read+reset by the main
-    //thread. Approximate by design - a lost update just means one slightly low reading.
     atomic<float> peakIn{0.0f}, peakOut{0.0f};
 
     //Which input channel the guitar is plugged into, counting from 0. The M-Audio
@@ -347,12 +386,10 @@ struct Amp{
 
         loop.init(sampleRate);
         delay.init(sampleRate);
-        cabinet.init(sampleRate);   //without this the biquads stay at pass-through
+        cabinet.init(sampleRate);   
         eq.init(sampleRate);
         gate.init(sampleRate);
-        distortion_on=false;
-        loop_on=false;
-        delay_on=false;
+        reverb.init(sampleRate);
     }
 
     //adjusting internal values of each effect
@@ -381,7 +418,6 @@ struct Amp{
         if (t<0.1f) t=0.1f;
         delay.delay_t = t;
     }
-    //EQ bands, in dB. +/-15 is already a drastic amount of tone shaping.
     void adjustEQLow(float db){
         if (db<-15.0f) db=-15.0f;
         if (db> 15.0f) db= 15.0f;
@@ -397,25 +433,38 @@ struct Amp{
         if (db> 15.0f) db= 15.0f;
         eq.highDb = db; eq.dirty = true;
     }
-    //Gate threshold given in dBFS, which is easier to reason about than a raw
-    //amplitude. Your noise floor sits near -78 dBFS and a strum near -14 dBFS.
     void adjustGateThreshold(float db){
         if (db<-90.0f) db=-90.0f;
         if (db>  0.0f) db=  0.0f;
         gate.threshold = powf(10.0f, db/20.0f);
     }
     void adjustDelayFadeFactor(float f){
-        //needs to be between 0-0.95 -> if higher then delay may never fade leading to noise
         if (f>0.95f) f = 0.95f;
         if (f<0.0f) f = 0.0f;
         delay.fade_factor = f;
     }
-    void adjustMaster(float f){
-        if(f>1.0f) f=1.0f;
-        if(f<0.0f) f=0.0f;
-        master = f;
+    void adjustMaster(float v){
+        if(v>1.0f) v=1.0f;
+        if(v<0.0f) v=0.0f;
+        master = v;
     }
-    //these four are called from the main thread, so they only ask - see applyControls
+    void adjustRoomSize(float rm){
+        if(rm>0.9f) rm=0.9f;
+        if(rm<0.0f) rm=0.0f;
+        reverb.roomSize = rm;
+    }
+    void adjustReverbMix(float m){
+        if(m>1.0f) m = 1.0f;
+        if(m<0.0f) m = 0.0f;
+        reverb.mix = m;
+    }
+    void adjustReverbDamp(float d){   //0 = bright tail, 1 = dark tail
+        if(d>0.95f) d = 0.95f;
+        if(d<0.0f)  d = 0.0f;
+        reverb.damp = d;
+    }
+    
+    
     void toggleLoopRecord(){
         loop.recordReq = true;
     }
@@ -442,6 +491,9 @@ struct Amp{
     void flipGate(){
         gate_on=!gate_on;
     }
+    void flipReverb(){
+        reverb_on=!reverb_on;
+    }
 
     //resetting memory effects
     void resetLoop(){
@@ -461,18 +513,15 @@ struct Amp{
     //applying effects depending on whether active or not
     float processAudio(float sample){
         float op = sample;
-        //Gate the live guitar first, before anything amplifies the hiss. Note it runs
-        //on the live signal only - loop playback is added afterwards, so an old loop
-        //does not get chopped up by the gate.
-        if (gate_on) op = gate.applyGate(op);
-        if (loop_on) op = loop.applyLoop(op);
+        
+        if (gate_on) op = gate.applyGate(op);   //gate first to remove hissing -> clean sound
+        if (loop_on) op = loop.applyLoop(op);   //loop is just clean guitar sound so comes first
         op = gain.applyGain(op);
         if (distortion_on) op=distortion.applyDistortion(op);
-        //Tone stack sits after the distortion and before the speaker, same as a real
-        //amp: preamp -> tone stack -> power amp -> cabinet.
-        if (eq_on) op = eq.applyEQ(op);
-        if (cabinet_on) op = cabinet.applyCabinet(op);   //the speaker: always on in normal use
+        if (eq_on) op = eq.applyEQ(op); //tone adjusted post distortion
+        if (cabinet_on) op = cabinet.applyCabinet(op);   //the speaker effect
         if (delay_on) op=delay.applyDelay(op);
+        if (reverb_on) op=reverb.applyReverb(op);   //at end so we echo final sound
 
         return op*master;   //apply master volume
     }
@@ -537,6 +586,7 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
          << "  switches -> Distortion: ds, Delay: dl, Loop: l, Cabinet: cb, EQ: eq, Gate: gs\n"
          << "  tone     -> Bass: eb <dB>, Mid: em <dB>, Treble: et <dB>  (-15..+15)\n"
          << "  gate     -> Threshold: gt <dBFS>  (try -50)\n"
+         << "  reverb   -> Reverb: rev, Reverb Mix: revm <val>, Room Size: rrs <val>, Damping: rvd <val>\n"
          << "  looper   -> Record: r, Overdub: o, Reset loop: lr, Reset delay: del\n"
          << "  diag     -> Peak levels: pk, Test tone: t, Input channel: ic <n>\n"
          << "  quit     -> q\n\n";
@@ -549,7 +599,7 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
 
         //commands that expect a number after them
         bool needsVal = (cmd=="g"||cmd=="dr"||cmd=="d"||cmd=="s"||cmd=="dt"||cmd=="df"||cmd=="ic"
-                      ||cmd=="eb"||cmd=="em"||cmd=="et"||cmd=="gt"||cmd=="m");
+                      ||cmd=="eb"||cmd=="em"||cmd=="et"||cmd=="gt"||cmd=="m"||cmd=="revm"||cmd=="rrs"||cmd=="rvd");
         if (needsVal && !(cin >> val)) {
             //a failed read latches the stream into a failed state and every later read
             //returns false, so without this one typo would silently end the session
@@ -560,6 +610,9 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
         }
 
         if      (cmd=="q")   break;
+        else if (cmd=="rrs") amp->adjustRoomSize(val);
+        else if (cmd=="revm") amp->adjustReverbMix(val);
+        else if (cmd=="rvd") amp->adjustReverbDamp(val);
         else if (cmd=="m") amp->adjustMaster(val);
         else if (cmd=="g")   amp->adjustGain(val);
         else if (cmd=="dr")  amp->adjustDrive(val);
@@ -573,6 +626,7 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
         else if (cmd=="cb")  amp->flipCabinet();
         else if (cmd=="eq")  amp->flipEQ();
         else if (cmd=="gs")  amp->flipGate();
+        else if (cmd=="rev") amp->flipReverb();
         else if (cmd=="eb")  amp->adjustEQLow(val);
         else if (cmd=="em")  amp->adjustEQMid(val);
         else if (cmd=="et")  amp->adjustEQHigh(val);
