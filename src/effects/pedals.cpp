@@ -9,9 +9,7 @@ Includes:
 #include "pedals.h"
 #include <cmath>
 
-//The bandpass is unity at its centre, so this puts the peak back up to the +12 dB
-//the old peaking filter had. 4.0 measured safe: 0.9 in -> 0.75 out on a hard strum.
-static const float WAH_MAKEUP = 4.0f;
+static const float WAH_MAKEUP = 4.0f;   //adjusting wah effect freq
 
 void Wah::init(float sampleRate){
     sr = sampleRate;
@@ -43,8 +41,6 @@ float Wah::applyWah(float sample){
         curMix = mix.load();
     }
 
-    //Linear crossfade, not the equal-power one the reverb uses: wet here is a filtered
-    //copy of dry, so the two are correlated in-band and a linear blend doesn't dip.
     float wet = band.applyBiquad(sample) * WAH_MAKEUP;
     return curMix * wet + (1.0f - curMix) * sample;
 

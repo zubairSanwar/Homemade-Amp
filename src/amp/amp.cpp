@@ -175,7 +175,7 @@ void Amp::applyControls(){
     eq.applyControls();     //rebuild filter coefficients if a tone knob moved
 }
 
-//applying effects depending on whether active or not
+//applying effects depending on whether active or not in fixed order
 float Amp::processAudio(float sample){
     float op = sample;
 

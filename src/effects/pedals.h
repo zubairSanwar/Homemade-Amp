@@ -11,7 +11,7 @@ Includes:
 #include <atomic>
 
 struct Wah{
-    Biquad band;    //resonant bandpass: the CUT either side of the band is what makes the vowel
+    Biquad band;    //wah cuts part of freq automatically for wah effect
     std::atomic<float> sensitivity{6.0f}, resonance{3.0f}, mix{1.0f};
     float env=0.0f;
     float curF = 400.0f;    

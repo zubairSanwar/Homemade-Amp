@@ -19,9 +19,6 @@ struct Loop{
     bool recording = false; //initial recording -> sets loop length
     bool overdub   = false; //overdubbing on recording -> maintains length
 
-    //The main thread only raises these; the audio thread is what actually acts on
-    //them. That keeps every change to recording/overdub/loopLen/pos on one thread, so
-    //those stay plain variables and can never be seen half-updated.
     std::atomic<bool> recordReq{false}, overdubReq{false}, clearReq{false};
 
     void init(int sampleRate);
@@ -46,8 +43,11 @@ struct Delay{
 };
 
 struct Reverb{
-    //Freeverb by Jezar at Dreampoint (public domain): 8 parallel damped
-    //comb filters build the tail, 4 series allpasses smear it.
+    /*
+    CREDIT:
+        Freeverb by Jezar at Dreampoint (public domain): 8 parallel damped
+        comb filters build the tail, 4 series allpasses smear it.
+    */
     std::atomic<float> roomSize{0.5f}, mix{0.3f}, damp{0.4f};
 
     std::vector<float> combBuf[8];
