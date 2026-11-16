@@ -20,6 +20,7 @@ struct Biquad{
     void setLowShelf(float freq, float gainDb, float sr);
     void setHighShelf(float freq, float gainDb, float sr);
     void setPeaking(float freq, float gainDb, float Q, float sr);
+    void setBandPass(float freq, float Q, float sr);
 };
 
 struct EQ{

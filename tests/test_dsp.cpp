@@ -322,7 +322,7 @@ int main(){
         }
 
         // the volume really should wobble, at roughly the rate asked for
-        {   Tremolo t; t.init(SR2); t.rate=5.0f; t.resonance=1.0f;
+        {   Tremolo t; t.init(SR2); t.rate=5.0f; t.depth=1.0f;
             int crossings=0; bool above=false;
             float mn=1e9f, mx=-1e9f;
             for (int i=0;i<(int)(SR2*2);i++){
@@ -340,7 +340,7 @@ int main(){
         }
 
         // depth 0 must be a true bypass, not a slight wobble
-        {   Tremolo t; t.init(SR2); t.rate=5.0f; t.resonance=0.0f;
+        {   Tremolo t; t.init(SR2); t.rate=5.0f; t.depth=0.0f;
             bool flat=true;
             for (int i=0;i<(int)SR2;i++){ float x=0.3f*sinf(i*0.01f); if (fabs(t.applyTremolo(x)-x)>1e-6f) flat=false; }
             check(flat, "tremolo depth 0 passes the signal untouched");
@@ -350,7 +350,7 @@ int main(){
         {   bool ok=true;
             float rates[3]={0.1f,5.0f,20.0f}, depths[3]={0.0f,0.5f,1.0f};
             for (int r=0;r<3;r++) for (int d=0;d<3;d++){
-                Tremolo t; t.init(SR2); t.rate=rates[r]; t.resonance=depths[d];
+                Tremolo t; t.init(SR2); t.rate=rates[r]; t.depth=depths[d];
                 for (int i=0;i<(int)SR2;i++){
                     float y=t.applyTremolo(1.0f);
                     if (!std::isfinite(y) || y<-1e-6f || y>1.0f+1e-6f) ok=false;

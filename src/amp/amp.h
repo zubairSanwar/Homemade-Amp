@@ -66,8 +66,9 @@ struct Amp{
     void adjustReverbDamp(float d);
     void adjustWahSensitivity(float s);
     void adjustWahResonance(float q);
+    void adjustWahMix(float m);
     void adjustTremoloRate(float r);
-    void adjustTremoloResonance(float r);
+    void adjustTremoloDepth(float d);
 
     //adjust on/off switches
     void toggleLoopRecord();

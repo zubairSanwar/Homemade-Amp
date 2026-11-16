@@ -100,16 +100,21 @@ void Amp::adjustWahResonance(float q){
     if(q>8.0f) q = 8.0f;
     wah.resonance = q;
 }
+void Amp::adjustWahMix(float m){   //0 = dry, 1 = the full thin/vocal bandpass
+    if(m<0.0f) m = 0.0f;
+    if(m>1.0f) m = 1.0f;
+    wah.mix = m;
+}
 
 void Amp::adjustTremoloRate(float r){
     if (r>20.0f) r=20.0f;
     if (r<0.1f) r=0.1f;
     tremolo.rate = r;
 }
-void Amp::adjustTremoloResonance(float r){
-    if (r>1.0f) r=1.0f;
-    if (r<0.0f) r=0.0f;
-    tremolo.resonance = r;
+void Amp::adjustTremoloDepth(float d){
+    if (d>1.0f) d=1.0f;
+    if (d<0.0f) d=0.0f;
+    tremolo.depth = d;
 }
 
 void Amp::toggleLoopRecord(){
