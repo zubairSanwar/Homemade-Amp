@@ -1,3 +1,5 @@
 CLAUDE.md
 src/*.out
-amp
+/amp
+*.o
+*.d
