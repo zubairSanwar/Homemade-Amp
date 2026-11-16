@@ -9,19 +9,24 @@ Includes:
 #include "pedals.h"
 #include <cmath>
 
+//The bandpass is unity at its centre, so this puts the peak back up to the +12 dB
+//the old peaking filter had. 4.0 measured safe: 0.9 in -> 0.75 out on a hard strum.
+static const float WAH_MAKEUP = 4.0f;
+
 void Wah::init(float sampleRate){
     sr = sampleRate;
     attack  = 1.0f - expf(-1.0f/(0.005f*sr));   //5 ms: snaps open on the pick
-    release = 1.0f - expf(-1.0f/(0.150f*sr));   //150 ms: slides back down
+    release = 1.0f - expf(-1.0f/(0.060f*sr));   //60 ms: slides back down fast enough to re-quack on fast picking
     env = 0.0f;
     curF = 400.0f;
     counter = 0;
-    peak.setPeaking(curF, 12.0f, resonance.load(), sr);
+    curMix = mix.load();
+    band.setBandPass(curF, resonance.load(), sr);
 };
 
 float Wah::applyWah(float sample){
 
-    //essentially a high and low pass filter switcing at a fixed rate
+    //an envelope follower sweeping a resonant bandpass up and down
 
     float a=fabsf(sample);  //track how loud current play
     env += ((a > env) ? attack : release) * (a - env);
@@ -34,10 +39,14 @@ float Wah::applyWah(float sample){
         float targetF = 400.0f * powf(2200.0f/400.0f, drive);
 
         curF += 0.15f * (targetF - curF);   
-        peak.setPeaking(curF, 12.0f, resonance.load(), sr);
+        band.setBandPass(curF, resonance.load(), sr);
+        curMix = mix.load();
     }
 
-    return peak.applyBiquad(sample);
+    //Linear crossfade, not the equal-power one the reverb uses: wet here is a filtered
+    //copy of dry, so the two are correlated in-band and a linear blend doesn't dip.
+    float wet = band.applyBiquad(sample) * WAH_MAKEUP;
+    return curMix * wet + (1.0f - curMix) * sample;
 
 };
 
@@ -48,7 +57,7 @@ void Tremolo::init(float sr){
 float Tremolo::applyTremolo(float sample){
     //switching volume at a fixed rate following sin wave
     float lfo = 0.5f + 0.5f * sinf(2.0f * 3.14159265f * phase);  // 0..1
-    float gain = 1.0f - resonance * (1.0f - lfo);                    // (1-resonance)..1
+    float gain = 1.0f - depth * (1.0f - lfo);                        // (1-depth)..1
     phase += rate / sampleRate;
     if (phase >= 1.0f) phase -= 1.0f;
     return sample * gain;

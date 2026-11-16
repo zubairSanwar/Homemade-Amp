@@ -79,6 +79,20 @@ void Biquad::setPeaking(float freq, float gainDb, float Q, float sr) {
     a2 = (1.0f - alpha / A) / a0;
 }
 
+//Constant 0 dB peak gain bandpass (Audio EQ Cookbook "BPF").
+//Unity at the centre frequency whatever Q is, rolling off on both sides, so raising
+//Q narrows the band without also making it louder.
+void Biquad::setBandPass(float freq, float Q, float sr) {
+    float w0 = 2.0f * 3.14159265f * freq / sr;
+    float cosw = cosf(w0), alpha = sinf(w0) / (2.0f * Q);
+    float a0 = 1.0f + alpha;
+    b0 = alpha / a0;
+    b1 = 0.0f;
+    b2 = -alpha / a0;
+    a1 = (-2.0f * cosw) / a0;
+    a2 = (1.0f - alpha) / a0;
+}
+
 void EQ::init(float sampleRate){
     sr = sampleRate;
     dirty = true;
