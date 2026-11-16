@@ -14,6 +14,8 @@ void Amp::init(int sRate){
     eq.init(sampleRate);
     gate.init(sampleRate);
     reverb.init(sampleRate);
+    wah.init(sampleRate);
+    tremolo.init(sampleRate);
 }
 
 //adjusting internal values of each effect
@@ -88,6 +90,28 @@ void Amp::adjustReverbDamp(float d){   //0 = bright tail, 1 = dark tail
     reverb.damp = d;
 }
 
+void Amp::adjustWahSensitivity(float s){
+    if(s<0.5f) s = 0.5f;
+    if(s>30.0f) s = 30.0f;
+    wah.sensitivity = s;
+}
+void Amp::adjustWahResonance(float q){
+    if(q<1.0f) q = 1.0f;
+    if(q>8.0f) q = 8.0f;
+    wah.resonance = q;
+}
+
+void Amp::adjustTremoloRate(float r){
+    if (r>20.0f) r=20.0f;
+    if (r<0.1f) r=0.1f;
+    tremolo.rate = r;
+}
+void Amp::adjustTremoloResonance(float r){
+    if (r>1.0f) r=1.0f;
+    if (r<0.0f) r=0.0f;
+    tremolo.resonance = r;
+}
+
 void Amp::toggleLoopRecord(){
     loop.recordReq = true;
 }
@@ -117,6 +141,12 @@ void Amp::flipGate(){
 void Amp::flipReverb(){
     reverb_on=!reverb_on;
 }
+void Amp::flipWah(){
+    wah_on=!wah_on;
+}
+void Amp::flipTremolo(){
+    tremolo_on=!tremolo_on;
+}
 
 //resetting memory effects
 void Amp::resetLoop(){
@@ -140,8 +170,10 @@ float Amp::processAudio(float sample){
     if (gate_on) op = gate.applyGate(op);   //gate first to remove hissing -> clean sound
     if (loop_on) op = loop.applyLoop(op);   //loop is just clean guitar sound so comes first
     op = gain.applyGain(op);
+    if (wah_on) op = wah.applyWah(op);   //wah feeds the distortion, like a pedal in front of an amp
     if (distortion_on) op=distortion.applyDistortion(op);
     if (eq_on) op = eq.applyEQ(op); //tone adjusted post distortion
+    if (tremolo_on) op = tremolo.applyTremolo(op);
     if (cabinet_on) op = cabinet.applyCabinet(op);   //the speaker effect
     if (delay_on) op=delay.applyDelay(op);
     if (reverb_on) op=reverb.applyReverb(op);   //at end so we echo final sound

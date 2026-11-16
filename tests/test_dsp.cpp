@@ -234,6 +234,132 @@ int main(){
         }
     }
 
+    // ---- auto-wah ----
+    {
+        const float SR2 = 48000.0f;
+
+        // the resonant peak must follow how hard you play
+        float fQuiet, fLoud;
+        {   Wah w; w.init(SR2);
+            for (int i=0;i<(int)SR2;i++) w.applyWah(0.02f*sinf(2.0f*3.14159265f*220.0f*i/SR2));
+            fQuiet = w.curF;
+        }
+        {   Wah w; w.init(SR2);
+            for (int i=0;i<(int)SR2;i++) w.applyWah(0.25f*sinf(2.0f*3.14159265f*220.0f*i/SR2));
+            fLoud = w.curF;
+        }
+        printf("     (wah peak: quiet %.0f Hz -> loud %.0f Hz)\n", fQuiet, fLoud);
+        check(fLoud > fQuiet*2.0f, "wah sweeps up as you play harder");
+
+        // and fall back down when you stop
+        {   Wah w; w.init(SR2);
+            for (int i=0;i<(int)SR2;i++) w.applyWah(0.25f*sinf(2.0f*3.14159265f*220.0f*i/SR2));
+            float opened = w.curF;
+            for (int i=0;i<(int)SR2;i++) w.applyWah(0.0f);
+            check(w.curF < opened*0.6f, "wah falls back when the note dies away");
+        }
+
+        // coefficients are rebuilt in steps of 32 samples - that must not click.
+        // A clean sine can only move so far between samples; anything much larger
+        // is the filter jumping.
+        {   Wah w; w.init(SR2);
+            float prev=0, maxJump=0, sigMax=0;
+            for (int i=0;i<(int)(SR2*2);i++){
+                float shape = (i<SR2)? (float)i/SR2 : 2.0f-(float)i/SR2;   //sweep hard
+                float y = w.applyWah(0.4f*shape*sinf(2.0f*3.14159265f*300.0f*i/SR2));
+                if (i>100 && fabs(y-prev)>maxJump) maxJump=fabs(y-prev);
+                if (fabs(y)>sigMax) sigMax=fabs(y);
+                prev=y;
+            }
+            float expected = 2.0f*3.14159265f*300.0f/SR2*sigMax;
+            printf("     (wah step vs a clean sine's own slew: ratio %.2f)\n", maxJump/expected);
+            check(maxJump < expected*1.5f, "wah sweep is smooth (no zipper from stepped coefficients)");
+        }
+
+        // stable and bounded however the knobs are set
+        {   bool ok=true;
+            float qs[2]={1.0f,8.0f}, ss[2]={0.5f,30.0f};
+            for (int qi=0;qi<2;qi++) for (int si=0;si<2;si++){
+                Wah w; w.init(SR2); w.resonance=qs[qi]; w.sensitivity=ss[si];
+                float pk=0;
+                for (int i=0;i<(int)(SR2*3);i++){
+                    float y=w.applyWah(0.9f*sinf(2.0f*3.14159265f*110.0f*i/SR2));
+                    if (fabs(y)>pk) pk=fabs(y);
+                }
+                if (!std::isfinite(pk) || pk>20.0f) ok=false;
+            }
+            check(ok, "wah stays finite and bounded at every knob extreme");
+        }
+
+        // a hard strum through the whole amp must not slam into the output clamp
+        {   Amp a; a.init((int)SR2); a.flipWah();
+            float pk=0;
+            for (int i=0;i<(int)(SR2*2);i++){
+                float envl = expf(-2.0f*(i%(int)SR2)/SR2);
+                float x = 0.5f*envl*(sinf(2.0f*3.14159265f*196.0f*i/SR2)
+                                   + 0.6f*sinf(2.0f*3.14159265f*587.0f*i/SR2));
+                float y = a.processAudio(x);
+                if (fabs(y)>pk) pk=fabs(y);
+            }
+            printf("     (hard strum through the wah: peak %.3f)\n", pk);
+            check(pk <= 1.0f, "wah resonance does not push a strum past full scale");
+        }
+    }
+
+    // ---- tremolo ----
+    {
+        const float SR2 = 48000.0f;
+
+        // Amp::init() must reach every effect. Tremolo was added without being
+        // wired in here, and an uninitialised sampleRate turned the whole output
+        // to NaN - which the callback's isfinite guard then muted. Same class of
+        // bug as the forgotten cabinet.init().
+        {   Amp a; a.init((int)SR2); a.flipTremolo();
+            int bad=0;
+            for (int i=0;i<(int)SR2;i++)
+                if (!std::isfinite(a.processAudio(0.5f*sinf(2.0f*3.14159265f*220.0f*i/SR2)))) bad++;
+            check(bad==0, "every effect is initialised by Amp::init (tremolo produces finite audio)");
+        }
+
+        // the volume really should wobble, at roughly the rate asked for
+        {   Tremolo t; t.init(SR2); t.rate=5.0f; t.resonance=1.0f;
+            int crossings=0; bool above=false;
+            float mn=1e9f, mx=-1e9f;
+            for (int i=0;i<(int)(SR2*2);i++){
+                float y=t.applyTremolo(1.0f);      // DC in, so output == the LFO shape
+                if (y>mn) {}
+                if (y<mn) mn=y;
+                if (y>mx) mx=y;
+                bool nowAbove = y>0.5f;
+                if (nowAbove && !above) crossings++;
+                above=nowAbove;
+            }
+            printf("     (tremolo at 5 Hz: %d cycles in 2 s, depth %.2f..%.2f)\n", crossings, mn, mx);
+            check(crossings>=9 && crossings<=11, "tremolo runs at the rate you set");
+            check(mn<0.05f && mx>0.95f, "tremolo at full depth swings all the way");
+        }
+
+        // depth 0 must be a true bypass, not a slight wobble
+        {   Tremolo t; t.init(SR2); t.rate=5.0f; t.resonance=0.0f;
+            bool flat=true;
+            for (int i=0;i<(int)SR2;i++){ float x=0.3f*sinf(i*0.01f); if (fabs(t.applyTremolo(x)-x)>1e-6f) flat=false; }
+            check(flat, "tremolo depth 0 passes the signal untouched");
+        }
+
+        // never inverts the signal or exceeds unity, at any setting
+        {   bool ok=true;
+            float rates[3]={0.1f,5.0f,20.0f}, depths[3]={0.0f,0.5f,1.0f};
+            for (int r=0;r<3;r++) for (int d=0;d<3;d++){
+                Tremolo t; t.init(SR2); t.rate=rates[r]; t.resonance=depths[d];
+                for (int i=0;i<(int)SR2;i++){
+                    float y=t.applyTremolo(1.0f);
+                    if (!std::isfinite(y) || y<-1e-6f || y>1.0f+1e-6f) ok=false;
+                }
+            }
+            check(ok, "tremolo gain stays within 0..1 at every rate and depth");
+        }
+    }
+
     printf("\n%s\n", fails? "SOME TESTS FAILED" : "all tests passed");
     return fails;
 }
