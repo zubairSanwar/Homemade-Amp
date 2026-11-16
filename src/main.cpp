@@ -318,6 +318,7 @@ struct Amp{
     EQ eq;
     Gate gate;
     int sampleRate;
+    atomic<float> master{1.0f};
 
     //written by the main thread (the flip functions), read by the audio thread every
     //sample, so they have to be atomic or the optimiser may never reload them
@@ -409,6 +410,11 @@ struct Amp{
         if (f<0.0f) f = 0.0f;
         delay.fade_factor = f;
     }
+    void adjustMaster(float f){
+        if(f>1.0f) f=1.0f;
+        if(f<0.0f) f=0.0f;
+        master = f;
+    }
     //these four are called from the main thread, so they only ask - see applyControls
     void toggleLoopRecord(){
         loop.recordReq = true;
@@ -468,7 +474,7 @@ struct Amp{
         if (cabinet_on) op = cabinet.applyCabinet(op);   //the speaker: always on in normal use
         if (delay_on) op=delay.applyDelay(op);
 
-        return op;
+        return op*master;   //apply master volume
     }
 
 
@@ -527,7 +533,7 @@ void audio_process(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
 
 void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for testing
     cout << "Adjust: <cmd> <value>    Toggle/reset: <cmd>\n"
-         << "  values   -> Gain: g, Drive: dr, Dist level: d, Smooth: s, Delay time: dt, Delay fade: df\n"
+         << "  values   -> Gain: g, Drive: dr, Dist level: d, Smooth: s, Delay time: dt, Delay fade: df, Master: m\n"
          << "  switches -> Distortion: ds, Delay: dl, Loop: l, Cabinet: cb, EQ: eq, Gate: gs\n"
          << "  tone     -> Bass: eb <dB>, Mid: em <dB>, Treble: et <dB>  (-15..+15)\n"
          << "  gate     -> Threshold: gt <dBFS>  (try -50)\n"
@@ -543,7 +549,7 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
 
         //commands that expect a number after them
         bool needsVal = (cmd=="g"||cmd=="dr"||cmd=="d"||cmd=="s"||cmd=="dt"||cmd=="df"||cmd=="ic"
-                      ||cmd=="eb"||cmd=="em"||cmd=="et"||cmd=="gt");
+                      ||cmd=="eb"||cmd=="em"||cmd=="et"||cmd=="gt"||cmd=="m");
         if (needsVal && !(cin >> val)) {
             //a failed read latches the stream into a failed state and every later read
             //returns false, so without this one typo would silently end the session
@@ -554,6 +560,7 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
         }
 
         if      (cmd=="q")   break;
+        else if (cmd=="m") amp->adjustMaster(val);
         else if (cmd=="g")   amp->adjustGain(val);
         else if (cmd=="dr")  amp->adjustDrive(val);
         else if (cmd=="d")   amp->adjustDistortionLevel(val);
@@ -616,18 +623,18 @@ int main() {
         return -1;
     }
 
-    // ---- TEMPORARY DIAGNOSTIC ----
-    cout << "capture : " << device.capture.name
-        << "  ch=" << device.capture.internalChannels
-        << " rate=" << device.capture.internalSampleRate
-        << " period=" << device.capture.internalPeriodSizeInFrames
-        << "   [app sees " << device.capture.channels << " ch]\n";
-    cout << "playback: " << device.playback.name
-        << "  ch=" << device.playback.internalChannels
-        << " rate=" << device.playback.internalSampleRate
-        << " period=" << device.playback.internalPeriodSizeInFrames
-        << "   [app sees " << device.playback.channels << " ch]\n";
-    // ------------------------------
+    // // ---- TEMPORARY DIAGNOSTIC ----
+    // cout << "capture : " << device.capture.name
+    //     << "  ch=" << device.capture.internalChannels
+    //     << " rate=" << device.capture.internalSampleRate
+    //     << " period=" << device.capture.internalPeriodSizeInFrames
+    //     << "   [app sees " << device.capture.channels << " ch]\n";
+    // cout << "playback: " << device.playback.name
+    //     << "  ch=" << device.playback.internalChannels
+    //     << " rate=" << device.playback.internalSampleRate
+    //     << " period=" << device.playback.internalPeriodSizeInFrames
+    //     << "   [app sees " << device.playback.channels << " ch]\n";
+    // // ------------------------------
 
 
     amp.init(device.sampleRate);
