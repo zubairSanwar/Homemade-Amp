@@ -1,6 +1,6 @@
 #include <cstdio>
 #include <cmath>
-#include "structs.inc"
+#include "../src/amp/amp.h"
 
 int fails = 0;
 void check(bool ok, const char* name){ printf("%s  %s\n", ok?"PASS":"FAIL", name); if(!ok) fails++; }
@@ -124,20 +124,20 @@ int main(){
     {
         const float SR2 = 48000;
         // a) hiss well under the threshold must be crushed
-        {   Gate gt; gt.init(SR2); gt.threshold = 0.00316f;   // -50 dBFS
+        {   NoiseGate gt; gt.init(SR2); gt.threshold = 0.00316f;   // -50 dBFS
             float pk=0;
             for (int i=0;i<SR2;i++){ float y=gt.applyGate(0.0001f*sinf(i*0.1f)); if(fabs(y)>pk) pk=fabs(y); }
             check(pk < 0.0001f*0.05f, "gate crushes hiss below the threshold");
         }
         // b) a real note must pass essentially untouched once open
-        {   Gate gt; gt.init(SR2); gt.threshold = 0.00316f;
+        {   NoiseGate gt; gt.init(SR2); gt.threshold = 0.00316f;
             float pk=0;
             for (int i=0;i<SR2;i++){ float y=gt.applyGate(0.2f*sinf(2.0f*3.14159265f*220.0f*i/SR2));
                                      if (i>SR2/10 && fabs(y)>pk) pk=fabs(y); }
             check(pk > 0.19f, "gate passes a real note at full level");
         }
         // c) the attack must survive - gate must be open within a few ms of a note starting
-        {   Gate gt; gt.init(SR2); gt.threshold = 0.00316f;
+        {   NoiseGate gt; gt.init(SR2); gt.threshold = 0.00316f;
             int openAt = -1;
             for (int i=0;i<SR2/10;i++){
                 float y = gt.applyGate(0.2f*sinf(2.0f*3.14159265f*220.0f*i/SR2));
@@ -150,7 +150,7 @@ int main(){
         }
         // d) no chatter: watch the gate's own multiplier, not the waveform (the sine
         //    crosses zero 440x a second, which is not the gate opening and closing)
-        {   Gate gt; gt.init(SR2); gt.threshold = 0.01f;
+        {   NoiseGate gt; gt.init(SR2); gt.threshold = 0.01f;
             float prev=1; int flips=0;
             for (int i=0;i<SR2;i++){
                 float amp = 0.2f*expf(-3.0f*i/SR2);                 // decaying note
