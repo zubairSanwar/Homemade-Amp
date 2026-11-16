@@ -4,7 +4,7 @@
 # make clean  delete the binary and object files
 
 CXX      = g++
-CXXFLAGS = -O2 -std=c++17
+CXXFLAGS = -O2 -std=c++17 -MMD -MP
 LDFLAGS  = -lpthread -ldl -lm
 
 SRC = $(wildcard src/*.cpp src/*/*.cpp)
@@ -21,5 +21,8 @@ test:
 
 clean:
 	rm -f $(OBJ) $(OBJ:.o=.d) amp
+
+# editing tone.h rebuilds tone.o and amp.o without us listing that by hand
+-include $(OBJ:.o=.d)
 
 .PHONY: run test clean

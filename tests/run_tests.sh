@@ -11,8 +11,10 @@ cd "$(dirname "$0")/.."
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# glob the sources the same way the Makefile does, so a new effect file is picked
+# up automatically instead of silently failing to link
 g++ -O1 -g -std=c++17 -fsanitize=address,undefined \
     tests/test_dsp.cpp \
-    src/amp/amp.cpp src/effects/drive.cpp src/effects/tone.cpp src/effects/memory.cpp \
+    src/amp/*.cpp src/effects/*.cpp \
     -o "$TMP/test_dsp"
 "$TMP/test_dsp"

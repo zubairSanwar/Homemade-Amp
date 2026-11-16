@@ -69,6 +69,8 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
          << "  tone     -> Bass: eb <dB>, Mid: em <dB>, Treble: et <dB>  (-15..+15)\n"
          << "  gate     -> Threshold: gt <dBFS>  (try -50)\n"
          << "  reverb   -> Reverb: rev, Reverb Mix: revm <val>, Room Size: rrs <val>, Damping: rvd <val>\n"
+         << "  wah      -> Auto-wah: w, Sensitivity: ws <val> (0.5..30), Resonance: wq <val> (1..8)\n"
+         << "  tremolo  -> Tremolo: trem, Rate: tr <val>, Depth: tres <val>\n"
          << "  looper   -> Record: r, Overdub: o, Reset loop: lr, Reset delay: del\n"
          << "  diag     -> Peak levels: pk, Test tone: t, Input channel: ic <n>\n"
          << "  quit     -> q\n\n";
@@ -81,7 +83,8 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
 
         //commands that expect a number after them
         bool needsVal = (cmd=="g"||cmd=="dr"||cmd=="d"||cmd=="s"||cmd=="dt"||cmd=="df"||cmd=="ic"
-                      ||cmd=="eb"||cmd=="em"||cmd=="et"||cmd=="gt"||cmd=="m"||cmd=="revm"||cmd=="rrs"||cmd=="rvd");
+                      ||cmd=="eb"||cmd=="em"||cmd=="et"||cmd=="gt"||cmd=="m"||cmd=="revm"||cmd=="rrs"||cmd=="rvd"||cmd=="ws"||cmd=="wq"
+                      ||cmd=="tr"||cmd=="tres");
         if (needsVal && !(cin >> val)) {
             //a failed read latches the stream into a failed state and every later read
             //returns false, so without this one typo would silently end the session
@@ -92,6 +95,8 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
         }
 
         if      (cmd=="q")   break;
+        else if (cmd=="tr") amp->adjustTremoloRate(val);
+        else if (cmd=="tres") amp->adjustTremoloResonance(val);
         else if (cmd=="rrs") amp->adjustRoomSize(val);
         else if (cmd=="revm") amp->adjustReverbMix(val);
         else if (cmd=="rvd") amp->adjustReverbDamp(val);
@@ -109,6 +114,10 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
         else if (cmd=="eq")  amp->flipEQ();
         else if (cmd=="gs")  amp->flipGate();
         else if (cmd=="rev") amp->flipReverb();
+        else if (cmd=="w")   amp->flipWah();
+        else if (cmd=="trem") amp->flipTremolo();
+        else if (cmd=="ws")  amp->adjustWahSensitivity(val);
+        else if (cmd=="wq")  amp->adjustWahResonance(val);
         else if (cmd=="eb")  amp->adjustEQLow(val);
         else if (cmd=="em")  amp->adjustEQMid(val);
         else if (cmd=="et")  amp->adjustEQHigh(val);
