@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <atomic>
 #include <limits>
+#include <string>
+#include <cstdlib>
+#include <thread>
+#include <chrono>
 #define MINIAUDIO_IMPLEMENTATION
 #include "../external/miniaudio.h"
 
@@ -18,34 +22,41 @@ void audio_process(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     float* out = (float*)pOutput;
     const float* in = (const float*)pInput;
 
-    amp->applyControls();   //apply any knob presses once here, not per sample
-
     //The device picks its own channel counts, so read them rather than assume.
     //Both are fixed at init time, so they are safe to read from the audio thread.
     const ma_uint32 inCh  = pDevice->capture.channels;
     const ma_uint32 outCh = pDevice->playback.channels;
 
+    //Nothing sane to read from. Emit silence instead of indexing into a buffer that
+    //is not there - and note that the clamp below would underflow if inCh were 0.
+    if (in == NULL || inCh == 0) {
+        for (ma_uint32 i = 0; i < frameCount * outCh; ++i) out[i] = 0.0f;
+        return;
+    }
+
+    amp->applyControls();   //apply any knob presses once here, not per sample
+
     //pick the guitar's channel once per buffer, clamped so we can never read past
     //the end of a frame no matter what the user sets
     ma_uint32 ch = (ma_uint32)amp->inputChannel.load();
-    if (ch >= inCh) ch = inCh - 1;
+    if (ch >= inCh) ch = inCh - 1;      //safe: inCh is at least 1 by here
 
-    static float phase = 0.0f;
-    bool tone = amp->testTone.load();
-    float pin = 0.0f, pout = 0.0f;
+    //Peak per input channel, so `pk` can show which socket the guitar is really in.
+    //Kept in a stack array and published once per buffer, not once per sample.
+    const ma_uint32 meterCh = (inCh < (ma_uint32)Amp::MAX_METER_CH) ? inCh : (ma_uint32)Amp::MAX_METER_CH;
+    float chPeak[Amp::MAX_METER_CH] = {0.0f};
+    float pout = 0.0f;
 
     for (ma_uint32 i = 0; i < frameCount; ++i) {
         //interleaved: frame i starts at i*inCh, then step to the channel we want
-        float src = in[i * inCh + ch];
-        if (fabsf(src) > pin) pin = fabsf(src);
+        const float* frame = in + (size_t)i * inCh;
 
-        if (tone) {     //DIAGNOSTIC: quiet 440 Hz sine in place of the guitar
-            src = 0.1f * sinf(phase);
-            phase += 2.0f * 3.14159265f * 440.0f / amp->sampleRate;
-            if (phase > 2.0f*3.14159265f) phase -= 2.0f*3.14159265f;
+        for (ma_uint32 c = 0; c < meterCh; ++c) {
+            float a = fabsf(frame[c]);
+            if (a > chPeak[c]) chPeak[c] = a;
         }
 
-        float op = amp->processAudio(src);
+        float op = amp->processAudio(frame[ch]);
 
         //clipping input between fixed range to prevent issues in effects (e.g. in delay we might record faulty value leading to noise until reset)
         if (!isfinite(op)) op = 0.0f;
@@ -55,11 +66,31 @@ void audio_process(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
         if (fabsf(op) > pout) pout = fabsf(op);
 
         //mono out to however many output channels the device has (same signal to each)
-        for (ma_uint32 c = 0; c < outCh; ++c) out[i * outCh + c] = op;
+        for (ma_uint32 c = 0; c < outCh; ++c) out[(size_t)i * outCh + c] = op;
     }
 
-    if (pin  > amp->peakIn.load())  amp->peakIn.store(pin);
+    for (ma_uint32 c = 0; c < meterCh; ++c)
+        if (chPeak[c] > amp->peakCh[c].load()) amp->peakCh[c].store(chPeak[c]);
     if (pout > amp->peakOut.load()) amp->peakOut.store(pout);
+}
+
+//Listen for a moment and return the input channel carrying the strongest signal,
+//or -1 if nothing rose above the noise floor. This runs on the MAIN thread and only
+//reads the meters the callback publishes, so the audio thread is left alone - the
+//"no sleeps" rule is about the callback, not about here.
+int detectInputChannel(Amp* amp, float seconds) {
+    const float FLOOR = 0.01f;   //~-40 dBFS: above any interface's idle hiss, below a real note
+
+    for (int c = 0; c < Amp::MAX_METER_CH; ++c) amp->peakCh[c].store(0.0f);
+    std::this_thread::sleep_for(std::chrono::milliseconds((int)(seconds * 1000.0f)));
+
+    int best = -1;
+    float bestPeak = FLOOR;
+    for (int c = 0; c < amp->inputChannels; ++c) {
+        float p = amp->peakCh[c].load();
+        if (p > bestPeak) { bestPeak = p; best = c; }
+    }
+    return best;
 }
 
 void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for testing
@@ -72,7 +103,7 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
          << "  wah      -> Auto-wah: w, Sensitivity: ws <val> (0.5..30), Resonance: wq <val> (1..8), Mix: wm <val> (0..1)\n"
          << "  tremolo  -> Tremolo: trem, Rate: tr <val>, Depth: trd <val> (0..1)\n"
          << "  looper   -> Record: r, Overdub: o, Reset loop: lr, Reset delay: del\n"
-         << "  diag     -> Peak levels: pk, Test tone: t, Input channel: ic <n>\n"
+         << "  diag     -> Peak levels: pk, Input channel: ic <n> | ic auto\n"
          << "  quit     -> q\n\n";
 
     string cmd;
@@ -82,7 +113,7 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
         if (!(cin >> cmd)) break;   //end of input / ctrl-D
 
         //commands that expect a number after them
-        bool needsVal = (cmd=="g"||cmd=="dr"||cmd=="d"||cmd=="s"||cmd=="dt"||cmd=="df"||cmd=="ic"
+        bool needsVal = (cmd=="g"||cmd=="dr"||cmd=="d"||cmd=="s"||cmd=="dt"||cmd=="df"
                       ||cmd=="eb"||cmd=="em"||cmd=="et"||cmd=="gt"||cmd=="m"||cmd=="revm"||cmd=="rrs"||cmd=="rvd"||cmd=="ws"||cmd=="wq"||cmd=="wm"
                       ||cmd=="tr"||cmd=="trd");
         if (needsVal && !(cin >> val)) {
@@ -127,18 +158,39 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
         else if (cmd=="o")   amp->toggleLoopOverdub();
         else if (cmd=="lr")  amp->resetLoop();
         else if (cmd=="del") amp->resetDelay();
-        else if (cmd=="pk") {   //DIAGNOSTIC: peak since last check - is audio flowing?
-            cout << "  peak in=" << amp->peakIn.exchange(0.0f)
-                 << "  out=" << amp->peakOut.exchange(0.0f) << "\n";
+        else if (cmd=="pk") {   //peak since last check - is audio flowing, and on which channel?
+            int sel = amp->inputChannel.load();
+            cout << "  in ";
+            for (int c = 0; c < amp->inputChannels; ++c)
+                cout << "ch" << c << ": " << amp->peakCh[c].exchange(0.0f)
+                     << (c == sel ? " *   " : "     ");
+            cout << "\n  out: " << amp->peakOut.exchange(0.0f) << "\n";
         }
-        else if (cmd=="ic") {   //which input channel the guitar is on (0-based)
-            amp->inputChannel = (int)val;
-            cout << "  input channel " << (int)val << "\n";
-        }
-        else if (cmd=="t") {    //DIAGNOSTIC: test tone, takes the guitar out of the picture
-            bool on = !amp->testTone.load();
-            amp->testTone = on;
-            cout << "  test tone " << (on?"ON":"off") << "\n";
+        else if (cmd=="ic") {   //which input channel the guitar is on (0-based), or "auto"
+            string arg;
+            if (!(cin >> arg)) break;
+            if (arg == "auto") {
+                cout << "  listening 2 s - play now..." << flush;
+                int found = detectInputChannel(amp, 2.0f);
+                if (found >= 0) {
+                    amp->inputChannel = found;
+                    cout << "\n  guitar on input channel " << found << "\n";
+                } else {
+                    cout << "\n  nothing above the noise floor - left on channel "
+                         << amp->inputChannel.load() << "\n";
+                }
+            } else {
+                char* end = NULL;
+                long n = strtol(arg.c_str(), &end, 10);
+                if (end == arg.c_str() || *end != '\0') {
+                    cout << "  need a channel number or the word auto, e.g. ic 1\n";
+                } else {
+                    if (n < 0) n = 0;
+                    if (n > amp->inputChannels - 1) n = amp->inputChannels - 1;
+                    amp->inputChannel = (int)n;
+                    cout << "  input channel " << n << "\n";
+                }
+            }
         }
         else cout << "? unknown command\n";
     }
@@ -169,23 +221,19 @@ int main() {
         return -1;
     }
 
-    // // ---- TEMPORARY DIAGNOSTIC ----
-    // cout << "capture : " << device.capture.name
-    //     << "  ch=" << device.capture.internalChannels
-    //     << " rate=" << device.capture.internalSampleRate
-    //     << " period=" << device.capture.internalPeriodSizeInFrames
-    //     << "   [app sees " << device.capture.channels << " ch]\n";
-    // cout << "playback: " << device.playback.name
-    //     << "  ch=" << device.playback.internalChannels
-    //     << " rate=" << device.playback.internalSampleRate
-    //     << " period=" << device.playback.internalPeriodSizeInFrames
-    //     << "   [app sees " << device.playback.channels << " ch]\n";
-    // // ------------------------------
+    //What the driver actually gave us. Worth printing: channel counts and rate are
+    //negotiated, not forced, so they differ from one interface to the next.
+    cout << "Capture : " << device.capture.name
+         << "  " << device.capture.channels << " ch\n";
+    cout << "Playback: " << device.playback.name
+         << "  " << device.playback.channels << " ch\n";
+    cout << "Sample rate: " << device.sampleRate << "\n";
 
+    amp.inputChannels = (int)device.capture.channels;
+    if (amp.inputChannels < 1) amp.inputChannels = 1;
+    if (amp.inputChannels > Amp::MAX_METER_CH) amp.inputChannels = Amp::MAX_METER_CH;
 
     amp.init(device.sampleRate);
-    cout << "Sample rate: " << device.sampleRate << "\n";
-    cout << "Audio running.\n\n";
 
     // from here, miniaudio calls audio_process repeatedly
     if (ma_device_start(&device) != MA_SUCCESS) {
@@ -193,6 +241,23 @@ int main() {
         ma_device_uninit(&device);
         return -1;
     }
+
+    //Find the guitar instead of assuming it is on the channel my own interface uses.
+    //Needs the device running, so this has to come after ma_device_start.
+    if (amp.inputChannels > 1) {
+        cout << "\nFinding the guitar - play a few notes..." << flush;
+        int found = detectInputChannel(&amp, 2.0f);
+        if (found >= 0) {
+            amp.inputChannel = found;
+            cout << "\n  guitar on input channel " << found << "\n";
+        } else {
+            cout << "\n  nothing heard - starting on channel 0."
+                 << " Use `pk` to see every channel, or `ic auto` to retry.\n";
+        }
+    }
+
+    cout << "\nAudio running.\n\n";
+
     handle_inputs(&amp);        // keeps main alive; the audio runs on another thread
 
     ma_device_uninit(&device);

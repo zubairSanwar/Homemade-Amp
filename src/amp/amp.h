@@ -37,14 +37,25 @@ struct Amp{
     //switches for pedal effects
     std::atomic<bool> wah_on{false}, tremolo_on{false};
 
-    //testing values for input output signals
-    std::atomic<float> peakIn{0.0f}, peakOut{0.0f};
+    //How many input channels we bother metering. Interfaces with more than this still
+    //work, we just do not draw a meter for every socket. Fixed size so the callback can
+    //keep its running peaks in a stack array instead of allocating.
+    static constexpr int MAX_METER_CH = 8;
 
-    //Which input channel the guitar is plugged into, counting from 0. The M-Audio
-    //puts its instrument input on channel 2, so 1. A mono device (laptop mic) only
-    //has channel 0 - the callback clamps this, so an out-of-range value is harmless.
-    std::atomic<int> inputChannel{1};
-    std::atomic<bool> testTone{false};   //DIAGNOSTIC: ignore the guitar, emit a sine instead
+    //Peak since the last `pk`, one per input channel plus one for the output. The
+    //per-channel meters are how you find which socket the guitar is actually in.
+    std::atomic<float> peakCh[MAX_METER_CH] = {};
+    std::atomic<float> peakOut{0.0f};
+
+    //How many input channels this device actually gave us, capped at MAX_METER_CH.
+    //Written once at startup before the device starts, then only read by the main
+    //thread, so it does not need to be atomic.
+    int inputChannels = 1;
+
+    //Which input channel the guitar is plugged into, counting from 0. No longer
+    //hardcoded for one interface: it is detected at startup and can be redetected
+    //with `ic auto`. The callback clamps it, so an out-of-range value is harmless.
+    std::atomic<int> inputChannel{0};
 
     //initialise 
     void init(int sRate);
