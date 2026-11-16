@@ -153,13 +153,20 @@ void Amp::flipTremolo(){
     tremolo_on=!tremolo_on;
 }
 
+//setting effects to an explicit state 
+void Amp::setDistortion(bool on){ distortion_on = on; }
+void Amp::setLoop(bool on){ loop_on = on; }
+void Amp::setDelay(bool on){ delay_on = on; }
+void Amp::setCabinet(bool on){ cabinet_on = on; }
+void Amp::setEQ(bool on){ eq_on = on; }
+void Amp::setGate(bool on){ gate_on = on; }
+void Amp::setReverb(bool on){ reverb_on = on; }
+void Amp::setWah(bool on){ wah_on = on; }
+void Amp::setTremolo(bool on){ tremolo_on = on; }
+
 //resetting memory effects
-void Amp::resetLoop(){
-    loop.clearReq = true;
-}
-void Amp::resetDelay(){
-    delay.clearReq = true;
-}
+void Amp::resetLoop(){ loop.clearReq = true; }
+void Amp::resetDelay(){ delay.clearReq = true; }
 
 //audio thread: pick up anything the main thread asked for, once per buffer
 void Amp::applyControls(){

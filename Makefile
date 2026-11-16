@@ -1,5 +1,6 @@
 # make        build ./amp (only recompiles the files that changed)
-# make run    build and run
+# make run    build and run with the terminal command loop
+# make gui    build and run serving the web UI instead
 # make test   offline DSP tests
 # make clean  delete the binary and object files
 
@@ -14,7 +15,10 @@ amp: $(OBJ)
 	$(CXX) $(OBJ) -o $@ $(LDFLAGS)
 
 run: amp
-	./amp
+	./amp cli
+
+gui: amp
+	./amp gui
 
 test:
 	bash tests/run_tests.sh
@@ -25,4 +29,4 @@ clean:
 # editing tone.h rebuilds tone.o and amp.o without us listing that by hand
 -include $(OBJ:.o=.d)
 
-.PHONY: run test clean
+.PHONY: run gui test clean
