@@ -3,9 +3,11 @@
 #
 # Two suites:
 #   test_dsp.cpp       the effects themselves. Links src/amp + src/effects only.
-#   test_channels.cpp  the audio callback's channel handling. Needs src/main.cpp, so
-#                      that is compiled with -Dmain=amp_main to keep its main() out
-#                      of the way (and MINIAUDIO_IMPLEMENTATION comes along with it).
+#   test_channels.cpp  the audio callback's channel handling.
+#   test_api.cpp       the HTTP control API: validation, error bodies, read-back.
+#
+# The last two need src/main.cpp, which is compiled once with -Dmain=amp_main to keep
+# its main() out of the way (MINIAUDIO_IMPLEMENTATION comes along with it).
 #
 # Both built with AddressSanitizer + UBSan so buffer overruns and bad float math get caught.
 set -e
@@ -32,3 +34,11 @@ g++ $SAN \
     src/amp/*.cpp src/effects/*.cpp \
     -o "$TMP/test_channels" -lpthread -ldl -lm
 "$TMP/test_channels"
+
+echo
+echo "--- HTTP control API tests ---"
+g++ $SAN \
+    tests/test_api.cpp "$TMP/ampmain.o" \
+    src/amp/*.cpp src/effects/*.cpp \
+    -o "$TMP/test_api" -lpthread -ldl -lm
+"$TMP/test_api"

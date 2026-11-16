@@ -8,12 +8,193 @@
 #include <cstdlib>
 #include <thread>
 #include <chrono>
+#include <iomanip>
 #define MINIAUDIO_IMPLEMENTATION
 #include "../external/miniaudio.h"
+#include "../external/httplib.h"
 
 #include "amp/amp.h"
 
 using namespace std;
+
+static httplib::Server server;
+static std::thread serverThread;
+
+//Raised by /quit in GUI mode to exit cleanly
+static std::atomic<bool> quitRequested{false};
+
+//---- SERVER ENDPOINTS ---
+
+void startServer(Amp* amp){
+    if (!server.set_mount_point("/", "./ui")) {
+        //mount and check if /ui exists
+        cout << "  note: ./ui not found, serving the API only\n";
+    }
+
+    //for adjusting knob requests -> takes target float as req
+    server.Get("/knob", [amp](const httplib::Request& req, httplib::Response& res) {
+
+        if (!req.has_param("name") || !req.has_param("value")) {
+            res.status = 400;
+            res.set_content("need both name and value, e.g. /knob?name=adj_gain&value=2.5\n", "text/plain");
+            return;
+        }
+
+        string name = req.get_param_value("name");
+        float v = (float)atof(req.get_param_value("value").c_str());
+
+        //every setter manages its own range -> no check needed here
+        if (name=="adj_gain") amp->adjustGain(v);
+        else if (name=="adj_drive") amp->adjustDrive(v);
+        else if (name=="adj_smooth") amp->adjustEffectSmoothing(v);
+        else if (name=="adj_distortion") amp->adjustDistortionLevel(v);
+        else if (name=="adj_delay") amp->adjustDelayTime(v);
+        else if (name=="adj_delay_fade") amp->adjustDelayFadeFactor(v);
+        else if (name=="adj_eq_low") amp->adjustEQLow(v);
+        else if (name=="adj_eq_mid") amp->adjustEQMid(v);
+        else if (name=="adj_eq_high") amp->adjustEQHigh(v);
+        else if (name=="adj_gate") amp->adjustGateThreshold(v);
+        else if (name=="adj_master") amp->adjustMaster(v);
+        else if (name=="adj_room_size") amp->adjustRoomSize(v);
+        else if (name=="adj_rev_mix") amp->adjustReverbMix(v);
+        else if (name=="adj_rev_damp") amp->adjustReverbDamp(v);
+        else if (name=="wah_sensitivity") amp->adjustWahSensitivity(v);
+        else if (name=="wah_resonance") amp->adjustWahResonance(v);
+        else if (name=="wah_mix") amp->adjustWahMix(v);
+        else if (name=="tremolo_rate") amp->adjustTremoloRate(v);
+        else if (name=="tremolo_depth") amp->adjustTremoloDepth(v);
+        else{
+            res.status = 400;
+            res.set_content("unknown knob '" + name + "'\n", "text/plain");
+            return;
+        }
+
+        res.set_content("ok", "text/plain");
+    });
+
+    //on/off states and one-shot actions
+    server.Get("/switch", [amp](const httplib::Request& req, httplib::Response& res){
+        if (!req.has_param("name")){
+            res.status = 400;
+            res.set_content("need a name, e.g. /switch?name=eq&value=1\n", "text/plain");
+            return;
+        }
+
+        string name = req.get_param_value("name");
+
+        //One-shot actions. These carry no value because they are events, not states:
+        //the audio thread owns the looper's state and consumes the request flag.
+        if (name=="loop_record")  { amp->toggleLoopRecord();  res.set_content("ok","text/plain"); return; }
+        if (name=="loop_overdub") { amp->toggleLoopOverdub(); res.set_content("ok","text/plain"); return; }
+        if (name=="loop_reset")   { amp->resetLoop();         res.set_content("ok","text/plain"); return; }
+        if (name=="delay_reset")  { amp->resetDelay();        res.set_content("ok","text/plain"); return; }
+
+        //state changes accept target state to set to
+        if (!req.has_param("value")){
+            res.status = 400;
+            res.set_content("switch '" + name + "' needs value=0 or value=1\n", "text/plain");
+            return;
+        }
+        bool on = (req.get_param_value("value") == "1");
+
+        if (name=="distortion") amp->setDistortion(on);
+        else if (name=="loop") amp->setLoop(on);
+        else if (name=="delay") amp->setDelay(on);
+        else if (name=="cabinet") amp->setCabinet(on);
+        else if (name=="eq") amp->setEQ(on);
+        else if (name=="gate") amp->setGate(on);
+        else if (name=="reverb") amp->setReverb(on);
+        else if (name=="wah") amp->setWah(on);
+        else if (name=="tremolo") amp->setTremolo(on);
+        else{
+            res.status = 400;
+            res.set_content("unknown switch '" + name + "'\n", "text/plain");
+            return;
+        }
+
+        res.set_content("ok", "text/plain");
+    });
+
+    //
+    server.Get("/results", [amp](const httplib::Request&, httplib::Response& res) {
+        int sel = amp->inputChannel.load();
+        if (sel < 0 || sel >= amp->inputChannels) sel = 0;
+
+        string j = "[" + to_string(amp->peakCh[sel].exchange(0.0f))
+                 + "," + to_string(amp->peakOut.exchange(0.0f)) + "]";
+        res.set_content(j, "application/json");
+    });
+
+    //every current value, so the page can draw the knobs in the right positions on
+    //load instead of guessing defaults that may already have been changed
+    server.Get("/state", [amp](const httplib::Request&, httplib::Response& res) {
+        string j = "{";
+        j += "\"adj_gain\":"         + to_string(amp->gain.new_gain.load());
+        j += ",\"adj_smooth\":"      + to_string(amp->gain.smooth.load());
+        j += ",\"adj_drive\":"       + to_string(amp->distortion.new_drive.load());
+        j += ",\"adj_distortion\":"  + to_string(amp->distortion.out_level.load());
+        j += ",\"adj_delay\":"       + to_string(amp->delay.delay_t.load());
+        j += ",\"adj_delay_fade\":"  + to_string(amp->delay.fade_factor.load());
+        j += ",\"adj_eq_low\":"      + to_string(amp->eq.lowDb.load());
+        j += ",\"adj_eq_mid\":"      + to_string(amp->eq.midDb.load());
+        j += ",\"adj_eq_high\":"     + to_string(amp->eq.highDb.load());
+        //stored as a linear amplitude but set in dBFS, so convert back for the page
+        j += ",\"adj_gate\":"        + to_string(20.0f * log10f(amp->gate.threshold.load()));
+        j += ",\"adj_master\":"      + to_string(amp->master.load());
+        j += ",\"adj_room_size\":"   + to_string(amp->reverb.roomSize.load());
+        j += ",\"adj_rev_mix\":"     + to_string(amp->reverb.mix.load());
+        j += ",\"adj_rev_damp\":"    + to_string(amp->reverb.damp.load());
+        j += ",\"wah_sensitivity\":" + to_string(amp->wah.sensitivity.load());
+        j += ",\"wah_resonance\":"   + to_string(amp->wah.resonance.load());
+        j += ",\"wah_mix\":"         + to_string(amp->wah.mix.load());
+        j += ",\"tremolo_rate\":"    + to_string(amp->tremolo.rate.load());
+        j += ",\"tremolo_depth\":"   + to_string(amp->tremolo.depth.load());
+
+        j += ",\"distortion\":" + string(amp->distortion_on.load() ? "true" : "false");
+        j += ",\"loop\":"       + string(amp->loop_on.load()       ? "true" : "false");
+        j += ",\"delay\":"      + string(amp->delay_on.load()      ? "true" : "false");
+        j += ",\"cabinet\":"    + string(amp->cabinet_on.load()    ? "true" : "false");
+        j += ",\"eq\":"         + string(amp->eq_on.load()         ? "true" : "false");
+        j += ",\"gate\":"       + string(amp->gate_on.load()       ? "true" : "false");
+        j += ",\"reverb\":"     + string(amp->reverb_on.load()     ? "true" : "false");
+        j += ",\"wah\":"        + string(amp->wah_on.load()        ? "true" : "false");
+        j += ",\"tremolo\":"    + string(amp->tremolo_on.load()    ? "true" : "false");
+
+        j += ",\"sample_rate\":"    + to_string(amp->sampleRate);
+        j += ",\"input_channel\":"  + to_string(amp->inputChannel.load());
+        j += ",\"input_channels\":" + to_string(amp->inputChannels);
+        j += "}";
+        res.set_content(j, "application/json");
+    });
+
+    //GUI mode has no terminal to type `q` into. We only raise a flag here rather than
+    //calling server.stop() inside its own handler, so this response still gets sent.
+    server.Get("/quit", [](const httplib::Request&, httplib::Response& res) {
+        quitRequested = true;
+        res.set_content("shutting down\n", "text/plain");
+    });
+
+    //Anything that reached no handler -> send specific error msg
+    server.set_error_handler([](const httplib::Request& req, httplib::Response& res){
+        if (res.body.empty())
+            res.set_content("no handler for " + req.path + "\n", "text/plain");
+    });
+
+    serverThread = std::thread([] {
+        //listen() blocks until stop(). It returns false if the port is already in use
+        if (!server.listen("127.0.0.1", 8080))
+            cout << "\n  WARNING: could not bind 127.0.0.1:8080 (already in use?)"
+                    " - the GUI will not be able to connect\n";
+    });
+}
+
+void stopServer() {
+    if (!serverThread.joinable()) return;   //never started, nothing to wind down
+    server.stop();
+    serverThread.join();
+}
+
+//--- AUDIO PROCESSING ---
 
 void audio_process(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
 
@@ -23,12 +204,10 @@ void audio_process(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     const float* in = (const float*)pInput;
 
     //The device picks its own channel counts, so read them rather than assume.
-    //Both are fixed at init time, so they are safe to read from the audio thread.
     const ma_uint32 inCh  = pDevice->capture.channels;
     const ma_uint32 outCh = pDevice->playback.channels;
 
-    //Nothing sane to read from. Emit silence instead of indexing into a buffer that
-    //is not there - and note that the clamp below would underflow if inCh were 0.
+    //Nothing sane to read from. Emit silence instead of indexing into a buffer that is not there
     if (in == NULL || inCh == 0) {
         for (ma_uint32 i = 0; i < frameCount * outCh; ++i) out[i] = 0.0f;
         return;
@@ -36,13 +215,11 @@ void audio_process(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
 
     amp->applyControls();   //apply any knob presses once here, not per sample
 
-    //pick the guitar's channel once per buffer, clamped so we can never read past
-    //the end of a frame no matter what the user sets
+    //pick the guitar's channel once per buffer
     ma_uint32 ch = (ma_uint32)amp->inputChannel.load();
     if (ch >= inCh) ch = inCh - 1;      //safe: inCh is at least 1 by here
 
     //Peak per input channel, so `pk` can show which socket the guitar is really in.
-    //Kept in a stack array and published once per buffer, not once per sample.
     const ma_uint32 meterCh = (inCh < (ma_uint32)Amp::MAX_METER_CH) ? inCh : (ma_uint32)Amp::MAX_METER_CH;
     float chPeak[Amp::MAX_METER_CH] = {0.0f};
     float pout = 0.0f;
@@ -74,15 +251,25 @@ void audio_process(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     if (pout > amp->peakOut.load()) amp->peakOut.store(pout);
 }
 
-//Listen for a moment and return the input channel carrying the strongest signal,
-//or -1 if nothing rose above the noise floor. This runs on the MAIN thread and only
-//reads the meters the callback publishes, so the audio thread is left alone - the
-//"no sleeps" rule is about the callback, not about here.
+//--- AUTO SELECT GUITAR CHANNEL ---
+
+//How long the auto-detect listens for. Long enough for user to actually play guitar. Adjust as needed
+static const float DETECT_SECONDS = 6.0f;
+
 int detectInputChannel(Amp* amp, float seconds) {
     const float FLOOR = 0.01f;   //~-40 dBFS: above any interface's idle hiss, below a real note
 
     for (int c = 0; c < Amp::MAX_METER_CH; ++c) amp->peakCh[c].store(0.0f);
-    std::this_thread::sleep_for(std::chrono::milliseconds((int)(seconds * 1000.0f)));
+
+    //Count down out loud with the live per-channel peaks, so it is obvious the amp is listening
+    for (int left = (int)seconds; left > 0; --left) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        cout << "\r  " << (left - 1) << "s ";
+        for (int c = 0; c < amp->inputChannels; ++c)
+            cout << "   ch" << c << ": " << fixed << setprecision(3) << amp->peakCh[c].load();
+        cout << "    " << flush;
+    }
+    cout << "\n";
 
     int best = -1;
     float bestPeak = FLOOR;
@@ -92,6 +279,8 @@ int detectInputChannel(Amp* amp, float seconds) {
     }
     return best;
 }
+
+//--- CMD LINE AMP CONTROLS ---
 
 void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for testing
     cout << "Adjust: <cmd> <value>    Toggle/reset: <cmd>\n"
@@ -110,15 +299,18 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
     float val;
     while (true) {
         cout << "CMD: " << flush;
-        if (!(cin >> cmd)) break;   //end of input / ctrl-D
+        if (!(cin >> cmd)) {
+            cout << "\nno more input on stdin - exiting."
+                 << " Run from a terminal, or use `./amp gui`.\n";
+            break;
+        }
 
         //commands that expect a number after them
         bool needsVal = (cmd=="g"||cmd=="dr"||cmd=="d"||cmd=="s"||cmd=="dt"||cmd=="df"
                       ||cmd=="eb"||cmd=="em"||cmd=="et"||cmd=="gt"||cmd=="m"||cmd=="revm"||cmd=="rrs"||cmd=="rvd"||cmd=="ws"||cmd=="wq"||cmd=="wm"
                       ||cmd=="tr"||cmd=="trd");
         if (needsVal && !(cin >> val)) {
-            //a failed read latches the stream into a failed state and every later read
-            //returns false, so without this one typo would silently end the session
+            //a failed read latches the stream into a failed state and every later read returns false
             cin.clear();                                           //drop the error flag
             cin.ignore(numeric_limits<streamsize>::max(), '\n');   //bin the rest of the line
             cout << "  need a number, e.g. " << cmd << " 1.5\n";
@@ -170,13 +362,13 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
             string arg;
             if (!(cin >> arg)) break;
             if (arg == "auto") {
-                cout << "  listening 2 s - play now..." << flush;
-                int found = detectInputChannel(amp, 2.0f);
+                cout << "  listening " << (int)DETECT_SECONDS << " s - play now...\n" << flush;
+                int found = detectInputChannel(amp, DETECT_SECONDS);
                 if (found >= 0) {
                     amp->inputChannel = found;
-                    cout << "\n  guitar on input channel " << found << "\n";
+                    cout << "  guitar on input channel " << found << "\n";
                 } else {
-                    cout << "\n  nothing above the noise floor - left on channel "
+                    cout << "  nothing above the noise floor - left on channel "
                          << amp->inputChannel.load() << "\n";
                 }
             } else {
@@ -196,14 +388,27 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
     }
 }
 
-int main() {
+int main(int argc, char** argv) {
+
+    //Which control surface to run. Either: cmd line or GUI
+    bool useGui = false;
+    if (argc > 1) {
+        string mode = argv[1];
+        if      (mode=="gui" || mode=="--gui") useGui = true;
+        else if (mode=="cli" || mode=="--cli") useGui = false;
+        else {
+            cout << "usage: " << argv[0] << " [cli|gui]\n"
+                 << "  cli   type commands in this terminal (default)\n"
+                 << "  gui   serve the web UI on http://127.0.0.1:8080\n";
+            
+            return (mode=="-h" || mode=="--help") ? 0 : 1;
+        }
+    }
+
 
     ma_device_config config = ma_device_config_init(ma_device_type_duplex);
 
-    //Format we want miniaudio to hand us: f32 is a conversion it does for free.
-    //Channels and sample rate stay 0 = "whatever the device natively uses". Forcing
-    //capture to 1 channel on a 2-channel interface makes CoreAudio hand back a silent
-    //stream instead of downmixing, which is why the guitar never arrived.
+    //Setting up miniaudio
     config.capture.format   = ma_format_f32;   // float samples in
     config.capture.channels = 0;               // 0 = native
     config.playback.format  = ma_format_f32;   // float samples out
@@ -221,8 +426,7 @@ int main() {
         return -1;
     }
 
-    //What the driver actually gave us. Worth printing: channel counts and rate are
-    //negotiated, not forced, so they differ from one interface to the next.
+    //Just sanity check of what driver handed us
     cout << "Capture : " << device.capture.name
          << "  " << device.capture.channels << " ch\n";
     cout << "Playback: " << device.playback.name
@@ -243,22 +447,38 @@ int main() {
     }
 
     //Find the guitar instead of assuming it is on the channel my own interface uses.
-    //Needs the device running, so this has to come after ma_device_start.
     if (amp.inputChannels > 1) {
-        cout << "\nFinding the guitar - play a few notes..." << flush;
-        int found = detectInputChannel(&amp, 2.0f);
+        cout << "\nFinding the guitar - play a few notes...\n" << flush;
+        int found = detectInputChannel(&amp, DETECT_SECONDS);
         if (found >= 0) {
             amp.inputChannel = found;
-            cout << "\n  guitar on input channel " << found << "\n";
+            cout << "  guitar on input channel " << found << "\n";
         } else {
-            cout << "\n  nothing heard - starting on channel 0."
+            cout << "  nothing heard - starting on channel 0."
                  << " Use `pk` to see every channel, or `ic auto` to retry.\n";
         }
+    } else {
+        //Say so rather than silently skipping
+        cout << "\nOnly one input channel, so nothing to detect - using channel 0.\n";
     }
 
-    cout << "\nAudio running.\n\n";
+    if (useGui) {   //setting up server GUI model
+        startServer(&amp);
+        cout << "\nControl: web UI on http://127.0.0.1:8080\n";
+        cout << "Audio running. Ctrl-C to stop, or open /quit.\n\n";
 
-    handle_inputs(&amp);        // keeps main alive; the audio runs on another thread
+        //Nothing to read from in GUI mode, so just idle until the page says quit.
+        while (!quitRequested.load()){
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        cout << "shutting down\n";
+        stopServer();
+    } else {    //getting controls from terminal
+        cout << "\nControl: this terminal. Run with `gui` for the web UI.\n";
+        cout << "\nAudio running.\n\n";
+        handle_inputs(&amp);    // keeps main alive; the audio runs on another thread
+    }
 
     ma_device_uninit(&device);
     return 0;
