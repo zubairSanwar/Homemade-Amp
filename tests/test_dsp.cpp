@@ -10,7 +10,7 @@ int main(){
 
     // 1. Everything bypassed must be bit-identical to the input.
     {
-        Amp a; a.init(SR); a.flipCabinet(); a.flipEQ();   // clean path: no speaker, no tone stack
+        Amp a; a.init(SR); a.flipCabinet(); a.flipEQ(); a.flipGate();   // clean path: no speaker, tone stack or gate
         bool same = true;
         for (int i=0;i<SR;i++){ float x = sin(i*0.01f)*0.8f; if (a.processAudio(x)!=x) same=false; }
         check(same, "bypass is transparent (output == input)");
@@ -64,7 +64,7 @@ int main(){
 
     // 5. Looper: record/close now go through the request flags.
     {
-        Amp a; a.init(SR); a.flipCabinet(); a.flipEQ(); a.flipLoop();
+        Amp a; a.init(SR); a.flipCabinet(); a.flipEQ(); a.flipGate(); a.flipLoop();
         a.toggleLoopRecord(); a.applyControls();          // main thread asks, audio thread acts
         for (int i=0;i<1000;i++) a.processAudio((float)(i+1)/1000.0f);
         a.toggleLoopRecord(); a.applyControls();
@@ -158,6 +158,79 @@ int main(){
                 if (i>100){ float now = gt.g>0.5f?1.0f:0.0f; if(now!=prev) flips++; prev=now; }
             }
             check(flips <= 1, "gate does not chatter as a note decays through the threshold");
+        }
+    }
+
+    // 11. Reverb: must make a decaying tail, stay stable, and respect mix.
+    {
+        const float SR2 = 48000;
+        auto rt60 = [&](float rs){
+            Reverb r; r.init(SR2); r.roomSize=rs; r.mix=1.0f;
+            const int W=2400; float first=0;
+            for (int w=0; w<240; w++){
+                double sum=0;
+                for (int i=0;i<W;i++){ float y=r.applyReverb((w==0&&i==0)?1.0f:0.0f); sum+=(double)y*y; }
+                float rms=sqrtf(sum/W);
+                if (w==0) first=rms;
+                else if (rms < first*0.001f) return w*W/SR2;
+            }
+            return 99.0f;
+        };
+        float small = rt60(0.0f), big = rt60(0.9f);
+        printf("     (reverb tail: roomSize 0.0 -> %.2f s, roomSize 0.9 -> %.2f s)\n", small, big);
+        check(small > 0.1f && small < 1.5f, "small room gives a short tail");
+        check(big > small*2.0f && big < 12.0f, "big room gives a much longer tail");
+
+        // stability at the hottest setting: sustained loud input must not run away
+        {   Reverb r; r.init(SR2); r.roomSize=0.9f; r.mix=1.0f;
+            float peak=0;
+            for (int i=0;i<(int)(SR2*10);i++){
+                float y=r.applyReverb(0.9f*sinf(2.0f*3.14159265f*110.0f*i/SR2));
+                if (fabs(y)>peak) peak=fabs(y);
+            }
+            check(std::isfinite(peak) && peak < 4.0f, "reverb stays stable at max room size");
+        }
+        // mix=0 must be perfectly dry
+        {   Reverb r; r.init(SR2); r.roomSize=0.9f; r.mix=0.0f;
+            bool dry=true;
+            for (int i=0;i<SR2;i++){ float x=0.5f*sinf(i*0.01f); if (fabs(r.applyReverb(x)-x)>1e-6f) dry=false; }
+            check(dry, "reverb mix=0 passes the dry signal untouched");
+        }
+        // the mix knob should change the sound, not the volume. Noise in, RMS out,
+        // compared against the dry level at each setting.
+        {   float worst=0;
+            for (float m : {0.0f,0.2f,0.5f,0.8f,1.0f}){
+                Reverb r; r.init(SR2); r.mix=m;
+                unsigned seed=1; double sum=0; int n=0;
+                for (int i=0;i<SR2*3;i++){
+                    seed = seed*1664525u + 1013904223u;
+                    float x = 0.3f * ((float)(seed>>8)/8388608.0f - 1.0f);
+                    float y = r.applyReverb(x);
+                    if (i>SR2){ sum += (double)y*y; n++; }
+                }
+                float dB = 20.0f*log10f(sqrtf(sum/n)/0.1732f);
+                if (fabs(dB)>worst) worst=fabs(dB);
+            }
+            printf("     (worst level shift across the mix knob: %.1f dB)\n", worst);
+            check(worst < 1.5f, "reverb mix knob holds a steady level");
+        }
+        // damping darkens the tail: measure sample-to-sample change, which rises with
+        // high-frequency content
+        {   float bright[2];
+            float damps[2] = {0.0f, 0.9f};
+            for (int k=0;k<2;k++){
+                Reverb r; r.init(SR2); r.mix=1.0f; r.roomSize=0.7f; r.damp=damps[k];
+                float prev=0; double hf=0, tot=0;
+                for (int i=0;i<SR2*3;i++){
+                    float x = (i<480)? 0.5f*sinf(2.0f*3.14159265f*2000.0f*i/SR2) : 0.0f;
+                    float y = r.applyReverb(x);
+                    if (i>SR2/2){ hf += fabs(y-prev); tot += fabs(y); }
+                    prev = y;
+                }
+                bright[k] = (float)(hf/(tot+1e-12));
+            }
+            printf("     (tail brightness: damp 0.0 -> %.3f, damp 0.9 -> %.3f)\n", bright[0], bright[1]);
+            check(bright[1] < bright[0]*0.5f, "damping makes the reverb tail darker");
         }
     }
 
