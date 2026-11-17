@@ -117,11 +117,18 @@ void startServer(Amp* amp){
 
     //
     server.Get("/results", [amp](const httplib::Request&, httplib::Response& res) {
+        const int n = amp->inputChannels;
         int sel = amp->inputChannel.load();
-        if (sel < 0 || sel >= amp->inputChannels) sel = 0;
+        if (sel < 0 || sel >= n) sel = 0;
 
-        string j = "[" + to_string(amp->peakCh[sel].exchange(0.0f))
-                 + "," + to_string(amp->peakOut.exchange(0.0f)) + "]";
+        //Read and reset every channel in one pass
+        float ch[Amp::MAX_METER_CH];
+        for (int c = 0; c < n; ++c) ch[c] = amp->peakCh[c].exchange(0.0f);
+
+        //[selectedIn, out, ch0, ch1, ...] - the first two keep their old meaning
+        string j = "[" + to_string(ch[sel]) + "," + to_string(amp->peakOut.exchange(0.0f));
+        for (int c = 0; c < n; ++c) j += "," + to_string(ch[c]);
+        j += "]";
         res.set_content(j, "application/json");
     });
 
@@ -167,8 +174,21 @@ void startServer(Amp* amp){
         res.set_content(j, "application/json");
     });
 
-    //GUI mode has no terminal to type `q` into. We only raise a flag here rather than
-    //calling server.stop() inside its own handler, so this response still gets sent.
+    //Which input socket the guitar is in. The page sets this from its channel meters
+    server.Get("/input", [amp](const httplib::Request& req, httplib::Response& res){
+        if (!req.has_param("channel")){
+            res.status = 400;
+            res.set_content("need a channel, e.g. /input?channel=1\n", "text/plain");
+            return;
+        }
+        int n = atoi(req.get_param_value("channel").c_str());
+        if (n < 0) n = 0;
+        if (n > amp->inputChannels - 1) n = amp->inputChannels - 1;
+        amp->inputChannel = n;
+        res.set_content("ok", "text/plain");
+    });
+
+    //for clean exit
     server.Get("/quit", [](const httplib::Request&, httplib::Response& res) {
         quitRequested = true;
         res.set_content("shutting down\n", "text/plain");
@@ -447,7 +467,9 @@ int main(int argc, char** argv) {
     }
 
     //Find the guitar instead of assuming it is on the channel my own interface uses.
-    if (amp.inputChannels > 1) {
+    if (useGui) {
+        cout << "\nInput channel: starting on 0 - pick the right one in the browser.\n";
+    } else if (amp.inputChannels > 1) {
         cout << "\nFinding the guitar - play a few notes...\n" << flush;
         int found = detectInputChannel(&amp, DETECT_SECONDS);
         if (found >= 0) {

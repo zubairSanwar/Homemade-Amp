@@ -3,3 +3,5 @@ src/*.out
 /amp
 *.o
 *.d
+ui/SPEC.md
+ui/example.html
