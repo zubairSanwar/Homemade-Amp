@@ -84,12 +84,16 @@ const PEDALS = [
      overdub / loopLen are audio-thread-owned and not in /state), and at 60 s the
      audio thread closes the loop by itself. A lit button would lie. See SPEC.md. */
   { id:'loop', name:'Looper', sw:'loop', on:false, enamel:['#d4725c','#b9533c','#8e3a27','#2e0f09'],
+    tempo:true,
     buttons:[
+      { name:'loop_tap',     label:'Tap',     tempo:true },
       { name:'loop_record',  label:'Record'  },
       { name:'loop_overdub', label:'Overdub' },
       { name:'loop_reset',   label:'Erase'   }
     ],
-    note:'Record and Overdub each toggle on the amp. No lamp: the amp does not report looper state yet.' }
+    note:'Tap four times to set the tempo, then Record counts you in for 3 beats and '
+       + 'snaps the loop to whole beats. Without a tempo it records the moment you press. '
+       + 'No lamp: the amp does not report looper state yet.' }
 ];
 
 /* ---------- local mirror of every value ---------- */
@@ -481,10 +485,18 @@ PEDALS.forEach(fx=>{
       btn.addEventListener('click',()=>{
         btn.classList.add('held'); setTimeout(()=>btn.classList.remove('held'),140);
         sendAction(b.name);
+        if(b.tempo) refreshTempo();      // the amp works the BPM out, so read it back
       });
       col.appendChild(btn);
     });
     plate.appendChild(col);
+  }
+
+  // the tapped tempo lives on the amp - only ask for it after a tap
+  if(fx.tempo){
+    const t = document.createElement('div'); t.className='ped-tempo';
+    t.innerHTML = 'tempo <b id="loopBpm">--</b> BPM';
+    plate.appendChild(t);
   }
 
   if(fx.note){
@@ -518,6 +530,20 @@ PEDALS.forEach(fx=>{
   el.append(head, bodyEl);
   board.appendChild(el);
 });
+
+/* ---------- tapped tempo ----------
+   The amp times the taps by counting samples on the audio thread, so the browser
+   never needs a clock of its own - it just asks what the amp worked out. */
+async function refreshTempo(){
+  const body = await api('/state');
+  if(body === null) return;
+  const el = document.getElementById('loopBpm');
+  if(!el) return;
+  try{
+    const bpm = JSON.parse(body).loop_bpm;
+    el.textContent = (bpm && bpm > 0) ? bpm.toFixed(1) : '--';
+  }catch(err){ /* leave the last reading up */ }
+}
 
 /* ---------- fold all ---------- */
 const ta = document.getElementById('toggleAll');
@@ -589,6 +615,9 @@ function applyState(s){
     ser.textContent = `${s.sample_rate} Hz / IN ${s.input_channel} OF ${s.input_channels}`;
   }
   if(typeof s.input_channels === 'number') buildChannels(s.input_channels, s.input_channel);
+  const bpmEl = document.getElementById('loopBpm');
+  if(bpmEl && typeof s.loop_bpm === 'number')
+    bpmEl.textContent = s.loop_bpm > 0 ? s.loop_bpm.toFixed(1) : '--';
 }
 
 /* ---------- connect ----------

@@ -75,6 +75,7 @@ struct Amp{
     //adjust on/off switches
     void toggleLoopRecord();
     void toggleLoopOverdub();
+    void tapLoopTempo();
     void flipDistortion();
     void flipLoop();
     void flipDelay();
@@ -101,6 +102,6 @@ struct Amp{
     void resetDelay();
 
     //set flags once and start processing
-    void applyControls();
+    void applyControls(int frameCount);
     float processAudio(float sample);
 };
