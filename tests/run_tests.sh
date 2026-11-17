@@ -5,6 +5,7 @@
 #   test_dsp.cpp       the effects themselves. Links src/amp + src/effects only.
 #   test_channels.cpp  the audio callback's channel handling.
 #   test_api.cpp       the HTTP control API: validation, error bodies, read-back.
+#   test_ui_knobs.js   the browser UI's knob logic (needs node; skipped without it).
 #
 # The last two need src/main.cpp, which is compiled once with -Dmain=amp_main to keep
 # its main() out of the way (MINIAUDIO_IMPLEMENTATION comes along with it).
@@ -42,3 +43,13 @@ g++ $SAN \
     src/amp/*.cpp src/effects/*.cpp \
     -o "$TMP/test_api" -lpthread -ldl -lm
 "$TMP/test_api"
+
+echo
+echo "--- UI knob tests ---"
+# The only part of the project that needs node. Skip rather than fail if it is
+# not installed, so the C++ side still tests cleanly on a bare machine.
+if command -v node >/dev/null 2>&1; then
+    node tests/test_ui_knobs.js
+else
+    echo "SKIP  node not installed - ui/amp.js knob logic not checked"
+fi

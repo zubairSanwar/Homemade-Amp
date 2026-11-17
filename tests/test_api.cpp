@@ -64,6 +64,7 @@ int main(){
     rejects("/switch?name=eq",               "switch with no value is rejected");
     rejects("/switch?name=nonsense&value=1", "unknown switch name is rejected");
     rejects("/switch",                       "switch with no name at all is rejected");
+    rejects("/input",                        "input with no channel is rejected");
 
     // ---- a rejected request must not change anything ----
     {
@@ -111,15 +112,38 @@ int main(){
         check(ok, "/state returns every knob and switch");
     }
     {
-        amp.peakCh[1].store(0.42f); amp.peakOut.store(0.31f);
+        // [selectedIn, out, ch0, ch1, ...]. inputChannel is 1 here, so the first
+        // number must be channel 1's peak, not channel 0's.
+        amp.inputChannel = 1;
+        amp.peakCh[0].store(0.11f); amp.peakCh[1].store(0.42f); amp.peakOut.store(0.31f);
         auto a = cli.Get("/results");
         auto b = cli.Get("/results");
-        //a bare [in, out] array - the page destructures it
         bool ok = a && b && a->status==200
-                  && a->body == "[0.420000,0.310000]"
-                  && b->body == "[0.000000,0.000000]";
-        check(ok, "/results is [in,out] and resets the peaks for the next poll");
+                  && a->body == "[0.420000,0.310000,0.110000,0.420000]"
+                  && b->body == "[0.000000,0.000000,0.000000,0.000000]";
+        check(ok, "/results is [in,out,ch0,ch1] and resets every peak for the next poll");
         if (!ok && a && b) printf("        got '%s' then '%s'\n", a->body.c_str(), b->body.c_str());
+    }
+
+    // ---- /input: how the page corrects a wrong guitar channel ----
+    {
+        amp.inputChannel = 0;
+        accepts("/input?channel=1", "/input selects a channel");
+        check(amp.inputChannel.load() == 1, "/input actually moves the guitar channel");
+
+        cli.Get("/input?channel=7");          // device only has 2
+        check(amp.inputChannel.load() == 1, "/input clamps above the device's channel count");
+
+        cli.Get("/input?channel=-3");
+        check(amp.inputChannel.load() == 0, "/input clamps below zero");
+
+        // the picked channel must be the one /results reports as `in`
+        amp.inputChannel = 1;
+        amp.peakCh[0].store(0.10f); amp.peakCh[1].store(0.90f);
+        auto r = cli.Get("/results");
+        bool ok = r && r->body.rfind("[0.900000,", 0) == 0;
+        check(ok, "/results follows the channel /input picked");
+        if (!ok && r) printf("        got '%s'\n", r->body.c_str());
     }
 
     // ---- /quit: the only way out of GUI mode, since there is no terminal there ----

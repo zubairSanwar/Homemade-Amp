@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Homemade Z-1 — Amplifier</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600&family=Space+Mono:wght@400;700&family=Yellowtail&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="amp.css">
+</head>
+<body>
+<div class="rig">
+
+  <section class="cab" aria-label="Amplifier">
+    <div class="grille">
+      <span class="logo">Homemade</span>
+      <span class="logo-sub">Z-1</span>
+      <span class="handle" aria-hidden="true"></span>
+      <div class="power">
+        <button class="pwr on" id="pwrBtn" type="button" aria-pressed="true" aria-label="Power"></button>
+        <span class="pwr-lab" id="pwrLab">Power</span>
+      </div>
+    </div>
+
+    <div class="face wood">
+      <div class="face-id">
+        <span class="mod">Z-1</span>
+        <span class="ser" id="faceSer">BUILT BY HAND / NO. 001</span>
+      </div>
+      <div class="face-main" id="faceMain"></div>
+      <div class="face-meters">
+        <div class="meter" id="meterIn">
+          <span class="cap2">In</span>
+          <div class="ladder" data-ladder></div>
+          <span class="num">-99.9 dB</span>
+        </div>
+        <div class="meter" id="meterOut">
+          <span class="cap2">Out</span>
+          <div class="ladder" data-ladder></div>
+          <span class="num">-99.9 dB</span>
+        </div>
+      </div>
+      <div class="face-tail" id="faceTail"></div>
+    </div>
+  </section>
+
+  <section class="inputs" id="inputs" hidden aria-label="Input channel">
+    <span class="inputs-cap">Input</span>
+    <div class="inputs-rows" id="inputRows"></div>
+  </section>
+
+  <div class="board-cap">
+    <h2>Pedalboard</h2>
+    <span class="hint">Tap a pedal name to fold it away</span>
+  </div>
+  <section class="board" id="board" aria-label="Pedals"></section>
+
+  <div class="bus">
+    <span class="dot" id="dot" title="connection"></span>
+    <span class="lbl">amp</span><span class="tx" id="lastMsg">connecting...</span>
+    <button class="ghost" id="toggleAll">Fold all</button>
+  </div>
+</div>
+
+<script src="amp.js"></script>
+</body>
+</html>
