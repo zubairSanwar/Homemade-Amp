@@ -118,10 +118,16 @@ void Amp::adjustTremoloDepth(float d){
 }
 
 void Amp::toggleLoopRecord(){
+    //Arm the looper too. applyLoop() only runs when the loop is switched on, so
+    //pressing record with it off did nothing at all - no count-in, no recording.
+    loop_on = true;
     loop.recordReq = true;
 }
 void Amp::toggleLoopOverdub(){
     loop.overdubReq = true;
+}
+void Amp::tapLoopTempo(){   //one tap = one beat
+    loop.tapReq = true;
 }
 
 //setting effects on / off
@@ -169,8 +175,8 @@ void Amp::resetLoop(){ loop.clearReq = true; }
 void Amp::resetDelay(){ delay.clearReq = true; }
 
 //audio thread: pick up anything the main thread asked for, once per buffer
-void Amp::applyControls(){
-    loop.applyControls();
+void Amp::applyControls(int frameCount){
+    loop.applyControls(frameCount);
     delay.applyControls();
     eq.applyControls();     //rebuild filter coefficients if a tone knob moved
 }
@@ -190,5 +196,10 @@ float Amp::processAudio(float sample){
     if (delay_on) op=delay.applyDelay(op);
     if (reverb_on) op=reverb.applyReverb(op);   //at end so we echo final sound
 
-    return op*master;   //apply master volume
+    op *= master;   //apply master volume
+
+    //Count-in clicks go in AFTER master, so they never run through any other effect
+    if (loop_on) op += loop.beepOut;
+
+    return op;
 }

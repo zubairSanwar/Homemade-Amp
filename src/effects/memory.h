@@ -19,13 +19,32 @@ struct Loop{
     bool recording = false; //initial recording -> sets loop length
     bool overdub   = false; //overdubbing on recording -> maintains length
 
-    std::atomic<bool> recordReq{false}, overdubReq{false}, clearReq{false};
+    std::atomic<bool> recordReq{false}, overdubReq{false}, clearReq{false}, tapReq{false};
+
+    int sampleRate = 48000;
+
+    long long clock   = 0;      //samples processed since init
+    long long lastTap = -1;     //clock at the previous tap, -1 = none yet
+    int tapIntervals[4] = {};   //the last few gaps, in samples
+    int tapCount    = 0;
+    int beatSamples = 0;        //set to 120 BPM by init(); tapping replaces it
+    std::atomic<float> bpm{0.0f};   //published for the UI; init() sets 120
+
+    int   countInLeft = 0;      //samples left before recording begins, 0 = not counting
+    int   beepLeft    = 0;      //samples left of the current click
+    int   beepLen     = 0;
+    float beepPhase   = 0.0f;
+    float beepFreq    = 0.0f;
+    float beepOut     = 0.0f;   //this sample's click - Amp adds it AFTER master so it
+                                //never runs through distortion, cabinet or reverb
 
     void init(int sampleRate);
     void reset();
     void toggleRecord();
     void toggleOverdub();
-    void applyControls();
+    void registerTap();
+    void startBeep(float freq);
+    void applyControls(int frameCount);
     float applyLoop(float sample);
 };
 

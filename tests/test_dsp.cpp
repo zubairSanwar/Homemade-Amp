@@ -65,27 +65,35 @@ int main(){
     // 5. Looper: record/close now go through the request flags.
     {
         Amp a; a.init(SR); a.flipCabinet(); a.flipEQ(); a.flipGate(); a.flipLoop();
-        a.toggleLoopRecord(); a.applyControls();          // main thread asks, audio thread acts
+        a.loop.beatSamples = 0;   // no tempo: raw buffer mechanics, no count-in or snapping
+        a.toggleLoopRecord(); a.applyControls(128);          // main thread asks, audio thread acts
         for (int i=0;i<1000;i++) a.processAudio((float)(i+1)/1000.0f);
-        a.toggleLoopRecord(); a.applyControls();
+        a.toggleLoopRecord(); a.applyControls(128);
         check(a.loop.loopLen==1000, "loop length == samples recorded");
 
+        // Both ends of the loop are faded to hide the splice (10 ms, capped at a
+        // quarter of the loop), so compare only the middle. It must still be bit-exact.
+        int XF = (int)(0.010f*SR);
+        if (XF > 1000/4) XF = 1000/4;
         bool ok = true;
         for (int lap=0; lap<3; lap++)
             for (int i=0;i<1000;i++){
                 float y = a.processAudio(0.0f);
-                if (fabs(y - (float)(i+1)/1000.0f) > 1e-6f) ok = false;
+                bool inFade = (i < XF) || (i >= 1000-XF);
+                if (!inFade && fabs(y - (float)(i+1)/1000.0f) > 1e-6f) ok = false;
             }
         check(ok, "loop plays back exactly, same every lap (no off-by-one drift)");
 
-        a.toggleLoopOverdub(); a.applyControls();
+        a.toggleLoopOverdub(); a.applyControls(128);
         for (int i=0;i<1000;i++) a.processAudio(0.1f);
         check(a.loop.loopLen==1000, "overdub leaves loop length alone");
     }
 
     // 6. Recording past the 60 s buffer must stop cleanly.
     {
-        Amp a; a.init(SR); a.flipLoop(); a.toggleLoopRecord(); a.applyControls();
+        Amp a; a.init(SR); a.flipLoop();
+        a.loop.beatSamples = 0;   // fill the buffer, do not wait out a count-in
+        a.toggleLoopRecord(); a.applyControls(128);
         for (int i=0;i<SR*61;i++) a.processAudio(0.5f);
         check(a.loop.loopLen==SR*60 && !a.loop.recording, "buffer-full auto-closes the loop");
     }
@@ -95,9 +103,9 @@ int main(){
         Amp a; a.init(SR);
         a.resetDelay();                                    // main thread raises it
         check(a.delay.clearReq.load()==true,  "request pending before the callback runs");
-        a.applyControls();                                 // audio thread consumes it
+        a.applyControls(128);                                 // audio thread consumes it
         check(a.delay.clearReq.load()==false, "request cleared once applied");
-        a.applyControls();
+        a.applyControls(128);
         check(a.delay.clearReq.load()==false, "request does not re-fire");
     }
 
@@ -105,7 +113,7 @@ int main(){
     {
         Amp a; a.init(SR); a.flipCabinet(); a.flipEQ(); a.flipDelay(); a.adjustDelayTime(0.1f);
         for (int i=0;i<1000;i++) a.processAudio(0.9f);     // fill the line with echoes
-        a.resetDelay(); a.applyControls();
+        a.resetDelay(); a.applyControls(128);
         float sum=0; for (int i=0;i<SR;i++) sum += fabs(a.processAudio(0.0f));
         check(sum==0.0f, "reset delay clears the echoes");
     }
@@ -357,6 +365,121 @@ int main(){
                 }
             }
             check(ok, "tremolo gain stays within 0..1 at every rate and depth");
+        }
+    }
+
+    // ---- looper count-in and quantised stop ----
+    //
+    // The gap at the loop point was never a bug in the buffer - it was the stop
+    // press landing ~100 ms late, so loopLen carried dead air. Tapping a tempo
+    // gives a grid: the count-in starts recording on an exact downbeat, and the
+    // stop rounds to the nearest beat, so neither end depends on your reflexes.
+    {
+        const int SRi = (int)SR;
+        const int beat = SRi/2;          // 120 BPM
+
+        // tap four times, one beat apart. applyControls(n) is the only clock the
+        // looper has: it advances by n samples, exactly like the real callback.
+        auto tapTempo = [&](Amp& a){
+            a.tapLoopTempo(); a.applyControls(0);
+            for (int i=0;i<3;i++){ a.applyControls(beat); a.tapLoopTempo(); a.applyControls(0); }
+        };
+
+        {   Amp a; a.init(SRi); a.flipLoop();
+            tapTempo(a);
+            check(fabs(a.loop.bpm.load()-120.0f) < 0.5f, "tap tempo reads 120 BPM from four taps");
+            check(a.loop.beatSamples == beat, "and one beat is half a second at 48 kHz");
+        }
+
+        {   Amp a; a.init(SRi); a.flipLoop();
+            a.tapLoopTempo(); a.applyControls(0);
+            a.applyControls(SRi*5); a.tapLoopTempo(); a.applyControls(0);   // 12 BPM: not a beat
+            check(a.loop.beatSamples == beat && fabs(a.loop.bpm.load()-120.0f) < 0.01f,
+                  "an absurdly slow tap is ignored, leaving the tempo alone");
+        }
+
+        // count-in: the press arms it, the downbeat starts it
+        {   Amp a; a.init(SRi); a.flipCabinet(); a.flipEQ(); a.flipGate(); a.flipLoop();
+            tapTempo(a);
+            a.toggleLoopRecord(); a.applyControls(0);
+            check(!a.loop.recording, "a record press starts a count-in, not recording");
+
+            // count beep STARTS, not non-zero output: the click is a sine, so it is
+            // exactly 0.0 on its first sample and at every zero crossing
+            int beeps = 0, prevLeft = 0; bool wrote = false;
+            for (int i=0;i<3*beat;i++){
+                a.processAudio(0.5f);
+                if (a.loop.beepLeft > prevLeft) beeps++;
+                prevLeft = a.loop.beepLeft;
+                if (i < 3*beat-1 && a.loop.loopBuf[0] != 0.0f) wrote = true;
+            }
+            check(a.loop.recording, "recording starts exactly on the downbeat, 3 beats later");
+            if (beeps != 4) printf("     (expected 4 clicks, counted %d)\n", beeps);
+            check(beeps == 4, "three ticks plus a downbeat click");
+            check(!wrote, "nothing is written to the loop during the count-in");
+        }
+
+        // the clicks must not end up in the recording
+        {   Amp a; a.init(SRi); a.flipCabinet(); a.flipEQ(); a.flipGate(); a.flipLoop();
+            tapTempo(a);
+            a.toggleLoopRecord(); a.applyControls(0);
+            bool heard = false;
+            for (int i=0;i<3*beat;i++){ if (a.processAudio(0.0f) != 0.0f) heard = true; }
+            check(heard, "the count-in clicks are audible on the output");
+        }
+
+        // record for a given number of samples past the downbeat, then stop
+        auto lenAfter = [&](int samples)->int{
+            Amp a; a.init(SRi); a.flipCabinet(); a.flipEQ(); a.flipGate(); a.flipLoop();
+            tapTempo(a);
+            a.toggleLoopRecord(); a.applyControls(0);
+            for (int i=0;i<3*beat;i++) a.processAudio(0.5f);   // count-in; records 1 sample
+            for (int i=1;i<samples;i++) a.processAudio(0.5f);  // bring pos up to `samples`
+            a.toggleLoopRecord(); a.applyControls(0);
+            return a.loop.loopLen;
+        };
+
+        check(lenAfter(3*beat + beat/4) == 3*beat, "a late stop rounds down to the nearest beat");
+        check(lenAfter(3*beat + (3*beat)/4) == 4*beat, "an early stop rounds up to the nearest beat");
+        check(lenAfter(4*beat) == 4*beat, "a stop already on the beat is left alone");
+        check(lenAfter(beat/10) == beat, "a stop almost immediately still gives one whole beat");
+
+        // rounding up must not replay whatever an older take left in the buffer
+        {   Amp a; a.init(SRi); a.flipCabinet(); a.flipEQ(); a.flipGate(); a.flipLoop();
+            tapTempo(a);
+            a.toggleLoopRecord(); a.applyControls(0);
+            for (int i=0;i<3*beat;i++) a.processAudio(0.5f);
+            for (int i=1;i<beat/4;i++) a.processAudio(0.5f);   // pos = quarter of a beat
+            a.loop.loopBuf[beat/2] = 0.9f;                     // stale audio past pos
+            a.toggleLoopRecord(); a.applyControls(0);
+            check(a.loop.loopLen == beat, "rounding up extends the loop to one beat");
+            check(a.loop.loopBuf[beat/2] == 0.0f, "and silences the tail it never recorded");
+        }
+
+        // without a tempo nothing changes: record starts at once, length is exact
+        // a tempo is set from init(), so record always counts you in
+        {   Amp a; a.init(SRi); a.flipCabinet(); a.flipEQ(); a.flipGate(); a.flipLoop();
+            check(a.loop.beatSamples == beat && fabs(a.loop.bpm.load()-120.0f) < 0.01f,
+                  "a fresh amp already has a 120 BPM tempo, so record always ticks");
+            a.toggleLoopRecord(); a.applyControls(0);
+            check(!a.loop.recording, "record counts in even when nothing has been tapped");
+        }
+
+        // pressing record with the looper switched off must still work
+        {   Amp a; a.init(SRi); a.flipCabinet(); a.flipEQ(); a.flipGate();
+            check(!a.loop_on.load(), "looper starts switched off");
+            a.toggleLoopRecord(); a.applyControls(0);
+            check(a.loop_on.load(), "pressing record arms the looper");
+        }
+
+        // the escape hatch is still there for callers that want raw behaviour
+        {   Amp a; a.init(SRi); a.flipCabinet(); a.flipEQ(); a.flipGate(); a.flipLoop();
+            a.loop.beatSamples = 0;
+            a.toggleLoopRecord(); a.applyControls(128);
+            check(a.loop.recording, "with the tempo cleared, record starts immediately");
+            for (int i=0;i<1234;i++) a.processAudio(0.5f);
+            a.toggleLoopRecord(); a.applyControls(128);
+            check(a.loop.loopLen == 1234, "and the length is exactly what was played");
         }
     }
 

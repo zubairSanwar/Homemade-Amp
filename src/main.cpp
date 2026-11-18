@@ -84,6 +84,7 @@ void startServer(Amp* amp){
 
         //One-shot actions. These carry no value because they are events, not states:
         //the audio thread owns the looper's state and consumes the request flag.
+        if (name=="loop_tap")     { amp->tapLoopTempo();      res.set_content("ok","text/plain"); return; }
         if (name=="loop_record")  { amp->toggleLoopRecord();  res.set_content("ok","text/plain"); return; }
         if (name=="loop_overdub") { amp->toggleLoopOverdub(); res.set_content("ok","text/plain"); return; }
         if (name=="loop_reset")   { amp->resetLoop();         res.set_content("ok","text/plain"); return; }
@@ -167,6 +168,7 @@ void startServer(Amp* amp){
         j += ",\"wah\":"        + string(amp->wah_on.load()        ? "true" : "false");
         j += ",\"tremolo\":"    + string(amp->tremolo_on.load()    ? "true" : "false");
 
+        j += ",\"loop_bpm\":"       + to_string(amp->loop.bpm.load());   //0 = no tempo tapped yet
         j += ",\"sample_rate\":"    + to_string(amp->sampleRate);
         j += ",\"input_channel\":"  + to_string(amp->inputChannel.load());
         j += ",\"input_channels\":" + to_string(amp->inputChannels);
@@ -233,7 +235,7 @@ void audio_process(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
         return;
     }
 
-    amp->applyControls();   //apply any knob presses once here, not per sample
+    amp->applyControls(frameCount);   //apply any knob presses once here, not per sample
 
     //pick the guitar's channel once per buffer
     ma_uint32 ch = (ma_uint32)amp->inputChannel.load();
@@ -311,7 +313,7 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
          << "  reverb   -> Reverb: rev, Reverb Mix: revm <val>, Room Size: rrs <val>, Damping: rvd <val>\n"
          << "  wah      -> Auto-wah: w, Sensitivity: ws <val> (0.5..30), Resonance: wq <val> (1..8), Mix: wm <val> (0..1)\n"
          << "  tremolo  -> Tremolo: trem, Rate: tr <val>, Depth: trd <val> (0..1)\n"
-         << "  looper   -> Record: r, Overdub: o, Reset loop: lr, Reset delay: del\n"
+         << "  looper   -> Record: r, Overdub: o, Tap tempo: tap, Reset loop: lr, Reset delay: del\n"
          << "  diag     -> Peak levels: pk, Input channel: ic <n> | ic auto\n"
          << "  quit     -> q\n\n";
 
@@ -368,6 +370,10 @@ void handle_inputs(Amp* amp){   //allow control knobs through cmd line -> for te
         else if (cmd=="gt")  amp->adjustGateThreshold(val);
         else if (cmd=="r")   amp->toggleLoopRecord();
         else if (cmd=="o")   amp->toggleLoopOverdub();
+        else if (cmd=="tap") {
+            amp->tapLoopTempo();
+            cout << "  tap (" << amp->loop.bpm.load() << " BPM)\n";
+        }
         else if (cmd=="lr")  amp->resetLoop();
         else if (cmd=="del") amp->resetDelay();
         else if (cmd=="pk") {   //peak since last check - is audio flowing, and on which channel?
