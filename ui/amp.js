@@ -87,12 +87,13 @@ const PEDALS = [
     tempo:true,
     buttons:[
       { name:'loop_tap',     label:'Tap',     tempo:true },
-      { name:'loop_record',  label:'Record'  },
+      { name:'loop_record',  label:'Record', key:' ' },
       { name:'loop_overdub', label:'Overdub' },
       { name:'loop_reset',   label:'Erase'   }
     ],
     note:'Tap four times to set the tempo, then Record counts you in for 3 beats and '
        + 'snaps the loop to whole beats. Without a tempo it records the moment you press. '
+       + 'The space bar presses Record, so both hands can stay on the guitar. '
        + 'No lamp: the amp does not report looper state yet.' }
 ];
 
@@ -372,6 +373,7 @@ function selectChannel(c){
 /* ---------- faceplate ---------- */
 const faceMain = document.getElementById('faceMain');
 const setters = {};                     // switch name -> fn(bool) to update the UI
+const hotkeys = {};                     // key -> the button it presses
 
 PANEL.forEach(fx=>{
   const grp = document.createElement('section'); grp.className='grp';
@@ -482,6 +484,7 @@ PEDALS.forEach(fx=>{
     fx.buttons.forEach(b=>{
       const btn=document.createElement('button'); btn.className='pb'; btn.type='button';
       btn.textContent = b.label;
+      if(b.key){ hotkeys[b.key] = btn; btn.title = b.key === ' ' ? 'Space bar' : b.key; }
       btn.addEventListener('click',()=>{
         btn.classList.add('held'); setTimeout(()=>btn.classList.remove('held'),140);
         sendAction(b.name);
@@ -544,6 +547,19 @@ async function refreshTempo(){
     el.textContent = (bpm && bpm > 0) ? bpm.toFixed(1) : '--';
   }catch(err){ /* leave the last reading up */ }
 }
+
+/* ---------- keyboard ----------
+   Record is already a toggle on the amp - the first press starts the loop, the
+   second closes it - so the space bar just presses the same button. */
+document.addEventListener('keydown', e=>{
+  const btn = hotkeys[e.key];
+  if(!btn || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+  const el = document.activeElement;
+  if(el && (el.tagName === 'INPUT' || el.isContentEditable)) return;   // let typing through
+  e.preventDefault();
+  if(el instanceof HTMLButtonElement) el.blur();   // or the browser presses that one too
+  btn.click();
+});
 
 /* ---------- fold all ---------- */
 const ta = document.getElementById('toggleAll');
